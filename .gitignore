@@ -1,0 +1,34 @@
+# 工作区杂项（逆向分析产物不入库）
+re_wechat_agent/
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 构建产物
+*.apk
+*.aab
+*.ap_
+*.dex
+!module/src/main/assets/*.dex
+
+# 签名材料（严禁入库）
+*.jks
+*.keystore
+!debug.keystore
+keystore.properties
+signing/
+
+# workspace metadata
+.operit/
