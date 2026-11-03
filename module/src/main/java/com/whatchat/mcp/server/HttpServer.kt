@@ -50,17 +50,24 @@ class HttpServer(
         try {
             val ss = ServerSocket()
             ss.reuseAddress = true
-            ss.bind(InetSocketAddress("127.0.0.1", port), 32)
+            ss.bind(InetSocketAddress("127.0.0.1", port), 64)
+            // 定期从 accept 里醒一次：一旦 poll 因为进程被冻结/网络栈抽风迟迟不返回，
+            // 也能靠超时把循环拉回可控状态，而不是让后到的连接全堵在 accept 队列里。
+            runCatching { ss.soTimeout = ACCEPT_POLL_TIMEOUT_MS }
             serverSocket = ss
             WxLog.i("MCP http listening on 127.0.0.1:$port")
             while (running) {
                 val socket = try {
                     ss.accept()
+                } catch (e: java.net.SocketTimeoutException) {
+                    continue
                 } catch (t: Throwable) {
                     if (running) WxLog.w("accept failed: ${t.message}")
                     null
                 } ?: continue
-                Thread({ serve(socket) }, "whatchat-conn").apply { isDaemon = true }.start()
+                // 连接用池化线程处理：不随连接数线性堆线程，避免长时间运行后新建线程被拖慢
+                runCatching { CONN_POOL.execute { serve(socket) } }
+                    .onFailure { runCatching { socket.close() } }
             }
         } catch (t: Throwable) {
             WxLog.e("http server loop died", t)
@@ -335,12 +342,20 @@ class HttpServer(
         private const val MAX_REQ_PER_CONN = 64
         private const val MAX_BODY = 8 * 1024 * 1024
 
+        /** accept 的轮询超时：定期醒一次，防止一次 poll 卡死后连接全堵在队列里。 */
+        private const val ACCEPT_POLL_TIMEOUT_MS = 30_000
+
         /**
          * 单连接内并行执行请求的工作线程池。
          * Eta 在一条 keep-alive 连接上并发发多个 tools/call，串行处理会让慢查询把后面的全堵死。
          */
         private val WORKERS: ExecutorService = Executors.newFixedThreadPool(8) { r ->
             Thread(r, "whatchat-work").apply { isDaemon = true }
+        }
+
+        /** 连接处理池：连接数不再线性映射到线程数，复用线程即可。 */
+        private val CONN_POOL: ExecutorService = Executors.newCachedThreadPool { r ->
+            Thread(r, "whatchat-conn").apply { isDaemon = true }
         }
     }
 }
