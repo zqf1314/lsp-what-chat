@@ -96,6 +96,7 @@ private fun registerActivity() {
                         topArr.put(
                             JSONObject()
                                 .put("talker", r["talker"] ?: "")
+                                .put("isChatroom", (r["talker"] ?: "").endsWith("@chatroom"))
                                 .put("total", r["total"]?.toIntOrNull() ?: 0)
                         )
                     }
@@ -127,13 +128,27 @@ private val AN_STOP = setOf(
     "自己", "时候", "已经", "还有", "这样", "那样", "然后", "感觉", "应该", "真的"
 )
 
+/** 英文/技术类噪音：URL 域名残片、文件名后缀、前端标记等，统计热词时直接丢掉。 */
+private val AN_NOISE = setOf(
+    "com", "cn", "net", "org", "io", "co", "http", "https", "www", "html", "htm",
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "mp4", "mov", "mp3", "wav",
+    "pdf", "zip", "rar", "7z", "apk", "json", "xml", "txt", "csv", "log", "xlog",
+    "utf", "utf8", "gbk", "div", "span", "href", "src", "img", "api", "url", "php", "asp", "jsp"
+)
+
+/** 微信表情占位符，如 `[捂脸]` `[强]` `[OK]`：整段剔掉，否则会污染成「捂脸」这类热词。 */
+private val AN_EMOJI = Regex("\\[[^\\[\\]]{1,10}\\]")
+
+/** 裸链接：整段剔掉，避免 https / com 这类残片进场。 */
+private val AN_URL = Regex("(?i)\\bhttps?://\\S+|\\bwww\\.\\S+")
+
 private fun registerHotWords() {
     ToolRegistry.register(
         ToolDef(
             name = "wx_hot_words",
             title = "聊天热词",
             description = "对最近若干天的文本消息做简单词频统计（中文按 2~4 字滑窗 + 停用词过滤，英文按整词）。" +
-                "结果只用于快速看话题，不是严格分词。",
+                "会自动剔掉 [表情] 占位符、裸链接和文件名后缀类噪音（com/jpg/https 等），结果只用于快速看话题，不是严格分词。",
             inputSchema = Schema.obj(
                 props = listOf(
                     "talker" to Schema.str("可选：只统计该会话"),
@@ -176,6 +191,8 @@ private fun registerHotWords() {
                     val nl = text.indexOf('\n')
                     if (nl in 1..60 && text.substring(0, nl).contains(":")) text = text.substring(nl + 1)
                     if (text.contains("<") && text.contains(">")) return@forEach // XML 卡片跳过
+                    // 先剔表情占位符和裸链接，再切词，否则 [捂脸] 会变成「捂脸」、URL 会留下 https/com
+                    text = AN_EMOJI.replace(AN_URL.replace(text, " "), " ")
                     text.split(Regex("[^\\u4e00-\\u9fffA-Za-z0-9]+")).forEach { seg ->
                         if (seg.isEmpty()) return@forEach
                         val cjk = seg.all { it.code in 0x4e00..0x9fff }
@@ -195,15 +212,19 @@ private fun registerHotWords() {
                             }
                         } else if (seg.length >= minLen && seg.any { it.isLetter() }) {
                             val w = seg.lowercase()
-                            counter[w] = (counter[w] ?: 0) + 1
+                            if (w !in AN_NOISE) counter[w] = (counter[w] ?: 0) + 1
                         }
                     }
                 }
 
                 val words = JSONArray()
+                // 同频按词字典序，保证同样的输入每次输出顺序一致（不然 AI 拿到的热词会来回跳）。
                 counter.entries
                     .filter { it.value >= minCount }
-                    .sortedByDescending { it.value }
+                    .sortedWith(Comparator { x, y ->
+                        val c = y.value.compareTo(x.value)
+                        if (c != 0) c else x.key.compareTo(y.key)
+                    })
                     .take(limit)
                     .forEach { e ->
                         words.put(JSONObject().put("word", e.key).put("count", e.value))
@@ -213,6 +234,7 @@ private fun registerHotWords() {
                     JSONObject()
                         .put("talker", talker)
                         .put("days", days)
+                        .put("sinceMs", sinceMs)
                         .put("sampled", rows.size)
                         .put("distinct", counter.size)
                         .put("words", words)
@@ -230,6 +252,7 @@ private fun registerContext() {
             name = "wx_context",
             title = "上下文打包",
             description = "把某条消息前后的聊天打包成上下文（默认前后各 20 条，按时间升序），便于直接喂给模型。" +
+                "每条带 createTime（毫秒）与 time（yyyy-MM-dd HH:mm:ss，东八区）。" +
                 "around 传 msgId；不传则取该会话最新消息作为锚点。",
             inputSchema = Schema.obj(
                 required = listOf("talker"),
@@ -267,16 +290,21 @@ private fun registerContext() {
                 ).firstOrNull() ?: return@safe Jsons.err("该会话没有消息：$talker", "NOT_FOUND")
 
                 val anchorTs = a["createTime"]?.toLongOrNull() ?: 0L
+                val anchorId = a["msgId"] ?: ""
+                // 用 (createTime, msgId) 复合比较：微信同一条会话里同一秒常有几条消息，
+                // 只按时间比较会把同秒的邻居漏掉（before/after 都受影响）。
                 val prev = if (before == 0) emptyList() else DbGateway.query(
                     "SELECT msgId,type,isSend,createTime,content FROM message" +
-                        " WHERE talker=? AND createTime<=? ORDER BY createTime DESC, msgId DESC LIMIT ?",
-                    arrayOf(talker, anchorTs.toString(), (before + 1).toString()),
-                    before + 1
+                        " WHERE talker=? AND (createTime<? OR (createTime=? AND msgId<?))" +
+                        " ORDER BY createTime DESC, msgId DESC LIMIT ?",
+                    arrayOf(talker, anchorTs.toString(), anchorTs.toString(), anchorId, before.toString()),
+                    before
                 ).reversed()
                 val next = if (after == 0) emptyList() else DbGateway.query(
                     "SELECT msgId,type,isSend,createTime,content FROM message" +
-                        " WHERE talker=? AND createTime>? ORDER BY createTime ASC, msgId ASC LIMIT ?",
-                    arrayOf(talker, anchorTs.toString(), after.toString()),
+                        " WHERE talker=? AND (createTime>? OR (createTime=? AND msgId>?))" +
+                        " ORDER BY createTime ASC, msgId ASC LIMIT ?",
+                    arrayOf(talker, anchorTs.toString(), anchorTs.toString(), anchorId, after.toString()),
                     after
                 )
 
@@ -320,6 +348,7 @@ private fun registerExportCsv() {
             name = "wx_export_csv",
             title = "导出消息 CSV",
             description = "把某个会话（或全库）的消息导出成 CSV，写到微信自己可写的目录（默认应用私有 files 目录）。" +
+                "列：msgId,type,isSend,createTime,talker,content,time（time 为东八区可读时间）。" +
                 "返回实际写入路径与行数，便于再拷出去。",
             inputSchema = Schema.obj(
                 props = listOf(
@@ -360,14 +389,15 @@ private fun registerExportCsv() {
                     ?: return@safe Jsons.err("拿不到微信 Context，无法写文件", "NO_CONTEXT")
                 val dir = ctx.filesDir
                 val file = java.io.File(dir, name)
-                val sb = StringBuilder("msgId,type,isSend,createTime,talker,content\n")
+                val sb = StringBuilder("msgId,type,isSend,createTime,talker,content,time\n")
                 rows.forEach { r ->
                     sb.append(csv(r["msgId"])).append(',')
                         .append(csv(r["type"])).append(',')
                         .append(csv(r["isSend"])).append(',')
                         .append(csv(r["createTime"])).append(',')
                         .append(csv(r["talker"])).append(',')
-                        .append(csv(r["content"])).append('\n')
+                        .append(csv(r["content"])).append(',')
+                        .append(csv(anTime(r["createTime"]?.toLongOrNull() ?: 0L))).append('\n')
                 }
                 file.writeText(sb.toString(), Charsets.UTF_8)
 
@@ -400,6 +430,7 @@ private fun registerExportCsv() {
 private fun anRow(r: Map<String, String>, isRoom: Boolean, maxChars: Int): JSONObject {
     val type = r["type"] ?: ""
     var content = r["content"] ?: ""
+    val tsMs = r["createTime"]?.toLongOrNull() ?: 0L
     var sender = ""
     if (isRoom) {
         val nl = content.indexOf('\n')
@@ -417,10 +448,22 @@ private fun anRow(r: Map<String, String>, isRoom: Boolean, maxChars: Int): JSONO
         .put("msgId", r["msgId"] ?: "")
         .put("type", type)
         .put("isSend", r["isSend"] ?: "")
-        .put("createTime", r["createTime"]?.toLongOrNull() ?: 0L)
+        .put("createTime", tsMs)
+        .put("time", anTime(tsMs))
         .put("sender", sender)
         .put("text", if (text.length > maxChars) text.substring(0, maxChars) else text)
         .put("content", content)
+}
+
+/** 东八区；只用于把毫秒 createTime 变成人能读的时间串。 */
+private val AN_TZ: java.util.TimeZone = java.util.TimeZone.getTimeZone("GMT+08:00")
+
+/** 毫秒时间戳 → `yyyy-MM-dd HH:mm:ss`（东八区）。0/负数返回空串。 */
+private fun anTime(tsMs: Long): String {
+    if (tsMs <= 0L) return ""
+    val f = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA)
+    f.timeZone = AN_TZ
+    return f.format(java.util.Date(tsMs))
 }
 
 private fun csv(v: String?): String {
