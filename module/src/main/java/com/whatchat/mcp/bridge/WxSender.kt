@@ -598,7 +598,7 @@ object WxSender {
         val err = arrayOfNulls<Throwable>(1)
         val done = WxEnv.callOnMain(15_000L) {
             try {
-                holder[0] = buildNetScene(talker, text, atWxIds, msgType)
+                holder[0] = buildNetScene(talker, text, atWxIds, msgType, msgClass)
             } catch (t: Throwable) {
                 err[0] = t
             }
