@@ -75,6 +75,7 @@ object WxSender {
         atWxIds: List<String> = emptyList(),
         dryRun: Boolean = true,
         msgType: Int = MSG_TYPE,
+        msgClass: String = MSG_CLASS,
     ): SendResult {
         val started = System.currentTimeMillis()
         val target = talker.trim()
@@ -113,7 +114,7 @@ object WxSender {
         }
 
         // ---------------------------------------------------------- 造对象 = 发送（微信主线程）
-        val outcome = buildOnMain(target, body, atList)
+        val outcome = buildOnMain(target, body, atList, msgType, msgClass)
         val built = outcome.scene
         if (built == null) {
             val detail = describeFailure(target)
@@ -344,6 +345,16 @@ object WxSender {
     /** 文件发送：同一张发送核方法表上的 Kj(String talker, String path, String fileName)。 */
     private const val FILE_METHOD = "Kj"
 
+    /** 文件发送（照抄参考实现 1.1.8 的 SDK 链路）。 */
+    private const val MSG_FILE_OBJECT = "com.tencent.mm.opensdk.modelmsg.WXFileObject"
+    private const val MSG_WX_MEDIA = "com.tencent.mm.opensdk.modelmsg.WXMediaMessage"
+    private const val FILE_SENDER_CLASS = "com.tencent.mm.pluginsdk.model.app.k0"
+    private const val FILE_APP_ID = "wx4310bbd51be7d979"
+    private const val FILE_APP_TYPE = "weixinfile"
+
+    /** 引用回复用 appmsg 的 netScene 类（q61.s0 是纯文本，q61.s1 才是 appmsg）。 */
+    private const val QUOTE_MSG_CLASS = "q61.s1"
+
     /** 引用回复走 appmsg：外层消息 type=49，内部 <appmsg><type>57</type><refermsg>… */
     private const val QUOTE_MSG_TYPE = 49
     private const val QUOTE_APPMSG_TYPE = 57
@@ -404,14 +415,50 @@ object WxSender {
     }
 
     private fun sendFileNow(talker: String, path: String, name: String, method: String): String? {
-        val core = resolveSendCore()
-            ?: return "找不到发送核心 $CORE_CLASS（$CORE_ENUM 枚举=" + enumSummary() + "）"
-        val m = findCoreMethod(core.javaClass, method, 3)
-            ?: return core.javaClass.name + " 上没有 $method/3，候选：" + candidateSummary(core, 3)
+        val cl = WxEnv.classLoader ?: return "classLoader 未就绪"
+        // 完全照抄参考实现 1.1.8 gea.ⁱⁱ 的链路：
+        //   obj1 = new WXFileObject(absPath)
+        //   obj2 = new WXMediaMessage(obj1); obj2.title = fileName
+        //   com.tencent.mm.pluginsdk.model.app.k0.F(obj2, appId, "weixinfile", talker, 2, "")
+        val fileObjCls = runCatching { Class.forName(MSG_FILE_OBJECT, true, cl) }.getOrNull()
+            ?: return "找不到 $MSG_FILE_OBJECT"
+        val mediaCls = runCatching { Class.forName(MSG_WX_MEDIA, true, cl) }.getOrNull()
+            ?: return "找不到 $MSG_WX_MEDIA"
+        val senderCls = runCatching { Class.forName(FILE_SENDER_CLASS, true, cl) }.getOrNull()
+            ?: return "找不到 $FILE_SENDER_CLASS"
+
+        val fileObj = runCatching {
+            fileObjCls.getConstructor(String::class.java).also { it.isAccessible = true }.newInstance(path)
+        }.getOrElse { return "构造 WXFileObject 失败：${it.javaClass.simpleName}: ${it.message}" }
+
+        val msg = runCatching {
+            mediaCls.getConstructor(fileObjCls).also { it.isAccessible = true }.newInstance(fileObj)
+        }.getOrElse { return "构造 WXMediaMessage 失败：${it.javaClass.simpleName}: ${it.message}" }
+
+        runCatching {
+            val f = mediaCls.getField("title")
+            f.isAccessible = true
+            f.set(msg, name)
+        }.onFailure { return "设置 WXMediaMessage.title 失败：${it.message}" }
+
+        val m = (senderCls.methods.asList() + senderCls.declaredMethods.asList())
+            .distinct()
+            .firstOrNull { it.name == method && it.parameterCount == 6 && it.parameterTypes[0].isInstance(msg) }
+            ?: return senderCls.name + " 上没有 " + method + "/6，候选：" + candidateSummary(senderCls.name, 6)
+
         m.isAccessible = true
-        return runCatching { m.invoke(core, talker, path, name) }
-            .fold({ null }, { "调用 $FILE_METHOD 失败：${it.javaClass.simpleName}: ${it.message}" })
+        val ret = runCatching { m.invoke(null, msg, FILE_APP_ID, FILE_APP_TYPE, talker, 2, "") }
+            .getOrElse { return "调用 k0.$method 失败：${it.javaClass.simpleName}: ${it.message}" }
+        WxLog.i("sendFile: k0.$method ret=$ret")
+        return null
     }
+
+    private fun candidateSummary(clsName: String, argc: Int): String = runCatching {
+        val cl = WxEnv.classLoader ?: return@runCatching "no-cl"
+        Class.forName(clsName, true, cl).declaredMethods.filter { it.parameterCount == argc }
+            .take(8)
+            .joinToString(";") { m -> m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")" }
+    }.getOrDefault("?")
 
     /** 发引用回复：自拼 refermsg appmsg，再按 type=49 走同一条发送链。 */
     fun sendQuote(
@@ -422,7 +469,7 @@ object WxSender {
         dryRun: Boolean = true,
     ): SendResult {
         val xml = buildQuoteXml(text.trim(), ref, atWxIds)
-        val r = sendText(talker, xml, atWxIds, dryRun, QUOTE_MSG_TYPE)
+        val r = sendText(talker, xml, atWxIds, dryRun, QUOTE_MSG_TYPE, QUOTE_MSG_CLASS)
         return if (!r.ok || r.dryRun) r else r.copy(
             message = "已提交引用回复（svrid=${ref.svrId}，appmsg ${r.textLength} 字符）"
         )
@@ -499,7 +546,7 @@ object WxSender {
     )
 
     /** 参考实现整条发送链都跑在微信主线程；构造消息对象也放主线程，避免碰到主线程断言。 */
-    private fun buildOnMain(talker: String, text: String, atWxIds: List<String>, msgType: Int = MSG_TYPE): BuildOutcome {
+    private fun buildOnMain(talker: String, text: String, atWxIds: List<String>, msgType: Int = MSG_TYPE, msgClass: String = MSG_CLASS): BuildOutcome {
         val holder = arrayOfNulls<Any?>(1)
         val err = arrayOfNulls<Throwable>(1)
         val done = WxEnv.callOnMain(15_000L) {
@@ -518,9 +565,9 @@ object WxSender {
         }
     }
 
-    private fun buildNetScene(talker: String, text: String, atWxIds: List<String>, msgType: Int = MSG_TYPE): Any {
+    private fun buildNetScene(talker: String, text: String, atWxIds: List<String>, msgType: Int = MSG_TYPE, msgClass: String = MSG_CLASS): Any {
         val cl = WxEnv.classLoader ?: throw IllegalStateException("classLoader 未就绪")
-        val cls = Class.forName(MSG_CLASS, true, cl)
+        val cls = Class.forName(msgClass, true, cl)
 
         val map = HashMap<String, String>()
         // 参考实现无条件塞这一项，@ 列表为空时就是空 CDATA

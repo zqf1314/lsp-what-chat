@@ -29,7 +29,7 @@ private fun registerSendFile() {
                     "talker" to Schema.str("会话标识：好友 wxid，或群聊 xxx@chatroom"),
                     "path" to Schema.str("文件绝对路径（必须微信进程可读）"),
                     "file_name" to Schema.str("可选：展示用文件名，缺省取文件本身的 name"),
-                    "method" to Schema.str("可选：指定 lt5.d5 上的方法名，默认 Kj"),
+                    "method" to Schema.str("可选：指定 lt5.d5 上的方法名，默认 F（k0.F）"),
                     "dry_run" to Schema.bool("仅探测不发送，默认 true")
                 )
             ),
@@ -48,7 +48,7 @@ private fun registerSendFile() {
 
                 val before = if (dryRun) 0L else fqLatestMsgId(talker)
                 val explicit = args.optString("method", "").trim()
-                val candidates = if (explicit.isEmpty()) listOf("Kj", "Tj", "Jj") else listOf(explicit)
+                val candidates = if (explicit.isEmpty()) listOf("F") else listOf(explicit)
                 var used = candidates.first()
                 var r = WxSender.sendFile(talker, path, name, dryRun, used)
                 var hit = if (r.ok && !r.dryRun) fqWaitNewMessage(talker, before, 2500L) else null
