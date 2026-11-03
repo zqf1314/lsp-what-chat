@@ -362,7 +362,7 @@ object WxSender {
     )
 
     /** 发文件。坐标：lt5.d5.Kj(talker, path, fileName)（运行时方法表勘察确认）。 */
-    fun sendFile(talker: String, filePath: String, fileName: String? = null, dryRun: Boolean = true): MediaResult {
+    fun sendFile(talker: String, filePath: String, fileName: String? = null, dryRun: Boolean = true, method: String = FILE_METHOD): MediaResult {
         val started = System.currentTimeMillis()
         val target = talker.trim()
         val path = filePath.trim()
@@ -392,7 +392,7 @@ object WxSender {
         val throttle = checkThrottle()
         if (throttle != null) return mediaFail(started, false, target, path, size, throttle)
 
-        val err = runCatching { WxEnv.callOnMain(20_000L) { sendFileNow(target, path, name) } }
+        val err = runCatching { WxEnv.callOnMain(20_000L) { sendFileNow(target, path, name, method) } }
             .getOrElse { "主线程执行失败：${it.javaClass.simpleName}: ${it.message}" }
         val cost = System.currentTimeMillis() - started
         if (err != null) {
@@ -403,11 +403,11 @@ object WxSender {
         return MediaResult(true, false, true, target, path, size, cost, "已提交给发送核心（不代表对方已收到）")
     }
 
-    private fun sendFileNow(talker: String, path: String, name: String): String? {
+    private fun sendFileNow(talker: String, path: String, name: String, method: String): String? {
         val core = resolveSendCore()
             ?: return "找不到发送核心 $CORE_CLASS（$CORE_ENUM 枚举=" + enumSummary() + "）"
-        val m = findCoreMethod(core.javaClass, FILE_METHOD, 3)
-            ?: return core.javaClass.name + " 上没有 $FILE_METHOD/3，候选：" + candidateSummary(core, 3)
+        val m = findCoreMethod(core.javaClass, method, 3)
+            ?: return core.javaClass.name + " 上没有 $method/3，候选：" + candidateSummary(core, 3)
         m.isAccessible = true
         return runCatching { m.invoke(core, talker, path, name) }
             .fold({ null }, { "调用 $FILE_METHOD 失败：${it.javaClass.simpleName}: ${it.message}" })
