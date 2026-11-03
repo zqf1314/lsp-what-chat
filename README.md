@@ -55,6 +55,7 @@
 | `wx_hot_words` | 聊天热词：中文 2~4 字滑窗 + 英文整词 + 停用词表 | ✅ |
 | `wx_context` | 上下文打包：按 `around` msgId（或最新一条）取前 N/后 M 条，群聊自动剥 `wxid:\n` 前缀 | ✅ |
 | `wx_export_csv` | 导出最近 N 天消息为 CSV（取最近 `limit` 条后升序落盘，私有 + `Android/data` 外部目录各一份） | ❌ |
+| `wx_open_add_friend` | 按 `wxid` 拉起对方资料页 / 打招呼页（进程内 `startActivity`，不需要 root；只跳界面，不发申请） | ❌ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
 ## 让微信不被冻结（重要，否则 MCP 会“连上不回”）
@@ -153,6 +154,7 @@ gradle :module:assembleRelease
 | **发图片返回 submitted 却查不到消息** | `wx_send_image` 命中发送核心、`submitted=true`、`costMs` 十几毫秒，但 `message` 表没有新行；`DupCheck-1.db` 有打开痕迹 | 不是坐标问题，是**分区存储**：`/sdcard` 走 FUSE，别的 app 或 `adb shell` 建的文件（即便 `chmod 644`、即便拷进 `com.tencent.mm` 目录）微信进程都读不到，发送核心**静默失败不报错**。换成微信自己目录下的图（`.../cache/*/openapi_cache/*.png`）立刻成功：`msgId=12735 type=3` 带 `<img aeskey/md5/length>`。0.2.14 起 `WxSender` 先做 `File.canRead()` 预检，`SendTools` 发后 2.5s 轮询 `message` 表返回 `verified/msgId/msgType` |
 | `su <uid> sh -c` 验证不了权限 | 以微信 uid 执行 `head` 仍报 `Permission denied`，容易误判 | `su` 起的进程不在微信的 mount namespace 里，FUSE 判定不适用。要判断「微信能不能读」只有两条路：在微信进程内 `File.canRead()`（模块已内置），或直接看发送后有没有入库 |
 | **`message.createTime` 是毫秒**（如 `1791352171000`） | `wx_activity` 的 `byDay` 全是 `"day": ""` 且只有 1 行；`total=12283` 看着像对的，其实 `createTime >= since(按秒算)` 恒真 → 统计的是**全库**，`days` 参数完全失效；`strftime('%Y-%m-%d', createTime, 'unixepoch')` 因数值超范围直接返回 NULL | 时间一律按毫秒：`sinceMs = System.currentTimeMillis() - days*86400_000L`；分天用 `strftime('%Y-%m-%d', createTime/1000 + 28800, 'unixepoch')`（先除 1000 再补 8h）。微信内置 sqlite 3.27.2 对 `strftime` 修饰符链敏感，别在 `'unixepoch'` 后再叠 `'localtime'`，叠了就整体 NULL。修后 7 天 `total=3601`、`byDay` 逐日正常 |
+| **直连启动 `FTSAddFriendUI` / `ChatroomInfoUI` 会把微信带崩** | 照搬 `wxadd.sh` 的 `add`/`room` 模式并连着测，微信进程直接消失：MCP 端口变 `Connection refused`、`pidof com.tencent.mm` 为空、`am start -a MAIN -c LAUNCHER -p com.tencent.mm` 报 `unable to resolve Intent`，只能用 `am start -n com.tencent.mm/.ui.LauncherUI` 拉回 | 这两个页面不是「按人加好友」的正路（`add` 不针对具体人、`room` 要自己在群里点成员头像）。已从 `wx_open_add_friend` 移除，只保留实测可用的 `profile`（`ContactInfoUI`）与 `sayhi`（`SayHiWithSnsPermissionUI`）。结论：**未验证的 Activity 不做默认分支，也不要连着批量测** |
 
 ## 与参考实现的关系
 
