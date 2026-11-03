@@ -20,6 +20,7 @@ object Tools {
         registerConversationTools()
         registerMessageTools()
         registerContactTools()
+        registerSendTools()
         registerRawSqlTool()
     }
 

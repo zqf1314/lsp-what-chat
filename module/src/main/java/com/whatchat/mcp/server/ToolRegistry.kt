@@ -81,4 +81,15 @@ object Schema {
         if (default != null) o.put("default", default)
         return o
     }
+
+    /** 字符串数组，例如 @ 的 wxid 列表。 */
+    fun arrStr(desc: String, minItems: Int? = null, maxItems: Int? = null): JSONObject {
+        val o = JSONObject()
+            .put("type", "array")
+            .put("description", desc)
+            .put("items", JSONObject().put("type", "string"))
+        if (minItems != null) o.put("minItems", minItems)
+        if (maxItems != null) o.put("maxItems", maxItems)
+        return o
+    }
 }

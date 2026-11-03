@@ -30,7 +30,7 @@
 |---|---|---|
 | M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
-| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 待开工 |
+| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 文本已通（0.2.9），图片/文件/引用待开工 |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
 
 ## 工具
@@ -44,6 +44,8 @@
 | `wx_search_messages` | 关键词搜索消息 | ✅ |
 | `wx_search_contacts` | 搜索联系人 | ✅ |
 | `wx_group_members` | 群成员与群主 | ✅ |
+| `wx_send_text` | 发送文本（默认 `dry_run=true`，只构造不发送） | ❌ |
+| `wx_send_limits` | 发送约束与当前限流用量 | ✅ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
 ## 构建
@@ -134,7 +136,7 @@ gradle :module:assembleRelease
 
 对应实现：`module/src/main/java/com/whatchat/mcp/bridge/WxDb.kt`（`WxEnv.callOnMain` 内解析与查询，避免微信 Core 的线程约束）；`DbGateway` 优先走它，`SqliteHook` 保留为兜底。
 
-### 发送消息坐标（微信 8.0.80，已逆出，待移植）
+### 发送消息坐标（微信 8.0.80，已移植到 `WxSender.kt`）
 
 参考实现的发消息是「自己造消息对象 → 交给微信网络核心发」，全程反射，不碰 UI：
 
@@ -142,10 +144,17 @@ gradle :module:assembleRelease
 |---|---|
 | 文本消息对象 | `Class.forName("q61.s0")`，构造参数 `(talker, text, Integer(1), Integer(0x123), HashMap, "")` |
 | @ 人 | 上面那个 HashMap 放 `"atuserlist" -> "<![CDATA[wxid1,wxid2]]>"` |
-| 提交 | `l54->ʻˆ()` 取微信网络核心类名 → 静态 `l54->ʻʻ()` 拿实例 → 对实例调 `l54->ʻʿ()`（doScene 语义），传 `(netScene, callback)` |
+| 提交 | `Class.forName("w41.i9")`（与取库同一个内核类）→ 静态 `e()` 拿网络核心实例 → 对实例调 `i(netScene, Integer(0))` |
 | 其它消息 | 图片/文件/引用/名片各有独立的 lambda（`sendWeChatImageMessage` / `sendWeChatFileMessage` / `sendWeChatQuoteMessage` / `sendWeChatContactCardMessage`），套路一致 |
 
 判空/长度校验参考实现也做了：`sendId` 与 `text` 不能为空、正文上限 4000 字（`0xfa0`），超限直接返回错误 JSON。
+
+本项目落地时的取舍：
+
+- 构造与提交都放 `WxEnv.callOnMain` 里执行（参考实现整条链也在主线程），避免微信 Core 的线程断言。
+- `dry_run` 默认 `true`：只走「造对象」这一步并回显真实类名，用于校验坐标；`dry_run=false` 才提交。
+- 限流：两条之间 ≥1.5s，每分钟 ≤20 条（`wx_send_limits` 可查当前窗口用量）。
+- 失败时日志带诊断串：`ctors=`（六个构造器签名）、静态方法表、`i/2` 候选方法表，坐标漂了能直接看出改成什么。
 
 ### 参考实现的能力面（1.1.8，共 6 个 ToolSet）
 
