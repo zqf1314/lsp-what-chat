@@ -29,6 +29,11 @@ object WxSender {
     private const val NETWORK_GETTER = "e"
     private const val SEND_METHOD = "i"
 
+    /** 图片发送核心（来自参考实现 l54 常量表：ʻˑ=lt5.o5 枚举容器、ˉˉ=lt5.d5 核心、ʼᵢ=Lj 方法名）。 */
+    private const val CORE_ENUM = "lt5.o5"
+    private const val CORE_CLASS = "lt5.d5"
+    private const val IMAGE_METHOD = "Lj"
+
     /** 参考实现的正文上限：0xfa0 = 4000 字。 */
     const val MAX_TEXT_LENGTH = 4000
 
@@ -158,6 +163,159 @@ object WxSender {
         return "net=$MSG_CLASS ctors=[$ctors] kernel=$KERNEL_CLASS " +
             (if (getter != null) "getter=$NETWORK_GETTER() ok" else "getter=missing(" + staticSummary(kernel) + ")")
     }
+
+    // ------------------------------------------------------------------ 图片
+
+    @Volatile
+    private var sendCoreCache: Any? = null
+
+    data class MediaResult(
+        val ok: Boolean,
+        val dryRun: Boolean,
+        val submitted: Boolean,
+        val talker: String,
+        val path: String,
+        val sizeBytes: Long,
+        val costMs: Long,
+        val message: String,
+    )
+
+    /**
+     * 发图片。坐标（8.0.80，来自参考实现 l54 常量表）：
+     *   枚举 `lt5.o5` 的常量 → `get()` → 实例类型必须是 `lt5.d5`（发送核心）
+     *   调核心的 `Lj(Context, talker, imagePath, 0, "", "", null, null, null)`（9 参）
+     */
+    fun sendImage(talker: String, imagePath: String, dryRun: Boolean = true): MediaResult {
+        val started = System.currentTimeMillis()
+        val target = talker.trim()
+        val path = imagePath.trim()
+
+        if (target.isEmpty()) return mediaFail(started, dryRun, target, path, 0L, "talker 不能为空")
+        if (path.isEmpty()) return mediaFail(started, dryRun, target, path, 0L, "path 不能为空")
+        val file = java.io.File(path)
+        if (!file.exists()) return mediaFail(started, dryRun, target, path, 0L, "文件不存在：$path")
+        if (!file.isFile) return mediaFail(started, dryRun, target, path, 0L, "不是普通文件：$path")
+        val size = runCatching { file.length() }.getOrDefault(0L)
+
+        if (dryRun) {
+            val probe = runCatching { probeImage() }.getOrElse { t ->
+                WxLog.e("sendImage[dryRun] probe failed", t)
+                return mediaFail(started, true, target, path, size, "能力探测失败：${t.javaClass.simpleName}: ${t.message}")
+            }
+            WxLog.i("sendImage[dryRun] talker=$target path=$path size=$size $probe")
+            return MediaResult(true, true, false, target, path, size, System.currentTimeMillis() - started, "dry_run：未发送。$probe")
+        }
+
+        val throttle = checkThrottle()
+        if (throttle != null) return mediaFail(started, false, target, path, size, throttle)
+
+        val ok = runCatching {
+            WxEnv.callOnMain(20_000L) { sendImageNow(target, path) } ?: false
+        }.getOrElse { t ->
+            WxLog.e("sendImage failed talker=$target", t)
+            return mediaFail(started, false, target, path, size, "发送失败：${t.javaClass.simpleName}: ${t.message}")
+        }
+        if (!ok) return mediaFail(started, false, target, path, size, "发送核心没找到或方法未命中，看日志 probe")
+
+        lastSendAt.set(System.currentTimeMillis())
+        bumpWindow()
+        val cost = System.currentTimeMillis() - started
+        WxLog.i("sendImage: sent talker=$target size=$size cost=${cost}ms")
+        return MediaResult(true, false, true, target, path, size, cost, "已提交给发送核心（不代表对方已收到）")
+    }
+
+    private fun sendImageNow(talker: String, path: String): Boolean {
+        val core = resolveSendCore() ?: run {
+            WxLog.e("sendImage: 没找到发送核心 $CORE_CLASS，$CORE_ENUM 枚举=" + enumSummary())
+            return false
+        }
+        val m = findMediaMethod(core.javaClass, IMAGE_METHOD)
+            ?: run {
+                WxLog.e("sendImage: ${core.javaClass.name} 上没有 $IMAGE_METHOD/9，候选：" + mediaCandidates(core))
+                return false
+            }
+        val app = WxEnv.app ?: run {
+            WxLog.e("sendImage: Application 未就绪")
+            return false
+        }
+        m.isAccessible = true
+        m.invoke(core, app, talker, path, 0, "", "", null, null, null)
+        return true
+    }
+
+    /** 枚举 lt5.o5 里挨个调 get()，取第一个类型是 lt5.d5 的实例。 */
+    private fun resolveSendCore(): Any? {
+        sendCoreCache?.let { return it }
+        val cl = WxEnv.classLoader ?: return null
+        val enumCls = Class.forName(CORE_ENUM, true, cl)
+        if (!enumCls.isEnum) {
+            WxLog.e("sendImage: $CORE_ENUM 不是枚举")
+            return null
+        }
+        val target = Class.forName(CORE_CLASS, true, cl)
+        val constants = enumCls.enumConstants ?: return null
+        for (c in constants) {
+            val inst = runCatching {
+                val g = c.javaClass.getMethod("get")
+                g.isAccessible = true
+                g.invoke(c)
+            }.getOrNull() ?: continue
+            if (target.isInstance(inst)) {
+                sendCoreCache = inst
+                return inst
+            }
+        }
+        return null
+    }
+
+    private fun findMediaMethod(cls: Class<*>, name: String): Method? =
+        (cls.methods.asList() + cls.declaredMethods.asList())
+            .distinct()
+            .firstOrNull { m ->
+                m.name == name && m.parameterCount == 9 &&
+                    m.parameterTypes[1] == String::class.java &&
+                    m.parameterTypes[2] == String::class.java
+            }
+
+    private fun probeImage(): String = buildString {
+        append("core=").append(CORE_CLASS).append(" enum=").append(CORE_ENUM)
+        val cl = WxEnv.classLoader
+        if (cl == null) {
+            append(" classLoader=null")
+            return@buildString
+        }
+        val enumCls = runCatching { Class.forName(CORE_ENUM, true, cl) }.getOrNull()
+        if (enumCls == null) {
+            append(" enumClass=missing")
+            return@buildString
+        }
+        append(" enumOk=").append(enumCls.isEnum)
+        val core = runCatching { resolveSendCore() }.getOrNull()
+        if (core == null) {
+            append(" core=missing constants=").append(enumSummary())
+            return@buildString
+        }
+        val m = findMediaMethod(core.javaClass, IMAGE_METHOD)
+        append(" method=").append(
+            m?.let { IMAGE_METHOD + "(" + it.parameterTypes.joinToString(",") { p -> p.simpleName } + ")" }
+                ?: "missing; 9-param=" + mediaCandidates(core)
+        )
+    }
+
+    private fun enumSummary(): String = runCatching {
+        val cl = WxEnv.classLoader ?: return@runCatching "no-cl"
+        val e = Class.forName(CORE_ENUM, true, cl)
+        (e.enumConstants ?: emptyArray<Any>()).joinToString(",") { it.javaClass.simpleName }
+    }.getOrDefault("?")
+
+    private fun mediaCandidates(core: Any): String =
+        core.javaClass.declaredMethods.filter { it.parameterCount == 9 }.take(8)
+            .joinToString(";") { m -> m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")" }
+
+    private fun mediaFail(
+        started: Long, dryRun: Boolean, talker: String, path: String,
+        size: Long, message: String,
+    ) = MediaResult(false, dryRun, false, talker, path, size, System.currentTimeMillis() - started, message)
 
     // ------------------------------------------------------------------ 反射
 

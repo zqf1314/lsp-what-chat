@@ -78,6 +78,49 @@ fun registerSendTools() {
 
     ToolRegistry.register(
         ToolDef(
+            name = "wx_send_image",
+            title = "发送图片",
+            description = "给指定会话发一张本地图片（走微信发送核心，不经 UI）。" +
+                "默认 dry_run=true：只解析发送核心（枚举 lt5.o5 → get() → lt5.d5）与 9 参方法 Lj，不发送；" +
+                "要真发必须 dry_run=false。path 必须是微信进程能读到的绝对路径。" +
+                "发送限流与文本共用（1.5 秒/条、每分钟 20 条）。",
+            inputSchema = Schema.obj(
+                required = listOf("talker", "path"),
+                props = listOf(
+                    "talker" to Schema.str("会话标识：好友 wxid，或群聊 xxx@chatroom"),
+                    "path" to Schema.str("图片绝对路径，例如 /sdcard/Download/a.png"),
+                    "dry_run" to Schema.bool("true = 只探测不发送（默认）；false = 真正发送", true),
+                )
+            ),
+            readOnly = false,
+            destructive = false,
+            idempotent = false,
+            openWorld = true,
+        ) { args ->
+            Tools.safe {
+                val talker = args.optString("talker", "")
+                if (talker.isBlank()) return@safe Jsons.err("talker 不能为空", "BAD_ARGUMENT")
+                val path = args.optString("path", "")
+                if (path.isBlank()) return@safe Jsons.err("path 不能为空", "BAD_ARGUMENT")
+                val dryRun = if (args.has("dry_run")) args.optBoolean("dry_run", true) else true
+
+                val r = WxSender.sendImage(talker, path, dryRun)
+                val data = JSONObject()
+                    .put("talker", r.talker)
+                    .put("path", r.path)
+                    .put("sizeBytes", r.sizeBytes)
+                    .put("dryRun", r.dryRun)
+                    .put("submitted", r.submitted)
+                    .put("costMs", r.costMs)
+                    .put("message", r.message)
+
+                if (r.ok) Jsons.ok(data) else Jsons.err(r.message, "SEND_FAILED").put("data", data)
+            }
+        }
+    )
+
+    ToolRegistry.register(
+        ToolDef(
             name = "wx_send_limits",
             title = "查看发送限制",
             description = "返回发送类工具的约束：正文长度上限、两条之间的最小间隔、每分钟条数上限、" +
