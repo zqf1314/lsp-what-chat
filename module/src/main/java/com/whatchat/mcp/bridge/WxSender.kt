@@ -454,7 +454,7 @@ object WxSender {
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
-        .replace("\"", """)
+        .replace("\"", "&" + "quot;")
 
     private fun findCoreMethod(cls: Class<*>, name: String, argc: Int): Method? =
         (cls.methods.asList() + cls.declaredMethods.asList())
