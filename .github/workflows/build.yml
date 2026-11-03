@@ -27,6 +27,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 新版 sdkmanager 已移除 "tools" 包，默认值会导致 Failed to find package 'tools'
+          packages: 'platform-tools build-tools;34.0.0 platforms;android-34'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
