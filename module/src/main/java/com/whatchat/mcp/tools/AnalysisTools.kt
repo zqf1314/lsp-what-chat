@@ -44,20 +44,21 @@ private fun registerActivity() {
                 val talker = args.optString("talker", "").trim()
                 val days = args.optInt("days", 7).coerceIn(1, 365)
                 val top = args.optInt("top", 10).coerceIn(1, 50)
-                val since = System.currentTimeMillis() / 1000 - days * 86400L
+                // message.createTime 实测是毫秒时间戳（如 1791352171000），
+                // 所以所有时间比较/格式化都必须按毫秒来，否则 where 恒真、strftime 返回 NULL。
+                val sinceMs = System.currentTimeMillis() - days * 86400_000L
 
                 val where = StringBuilder("createTime>=?")
-                val whereArgs = ArrayList<String>(listOf(since.toString()))
+                val whereArgs = ArrayList<String>(listOf(sinceMs.toString()))
                 if (talker.isNotEmpty()) {
                     where.append(" AND talker=?")
                     whereArgs.add(talker)
                 }
 
-                // 按天分桶统一用「时间戳 + 8h 偏移后按 UTC 格式化」的纯算术写法。
-                // 不写 'localtime'：微信内置 sqlite 对修饰符链比较挑，多挂一个修饰符
-                // 就会让整个 strftime 返回 NULL（曾表现为 day 全是空串）。
+                // 按天分桶：createTime 是毫秒，先 /1000 变秒，再 +8h 偏移后按 UTC 格式化。
+                // 不用 'localtime' 修饰符（微信内置 sqlite 3.27.2 对修饰符链敏感）。
                 val byDay = DbGateway.query(
-                    "SELECT strftime('%Y-%m-%d', createTime + 28800, 'unixepoch') AS day," +
+                    "SELECT strftime('%Y-%m-%d', createTime/1000 + 28800, 'unixepoch') AS day," +
                         " COUNT(*) AS total," +
                         " IFNULL(SUM(CASE WHEN isSend=1 THEN 1 ELSE 0 END),0) AS sent," +
                         " IFNULL(SUM(CASE WHEN isSend=0 THEN 1 ELSE 0 END),0) AS recv" +
@@ -89,7 +90,7 @@ private fun registerActivity() {
                     DbGateway.query(
                         "SELECT talker, COUNT(*) AS total FROM message WHERE createTime>=?" +
                             " GROUP BY talker ORDER BY total DESC LIMIT ?",
-                        arrayOf(since.toString(), top.toString()),
+                        arrayOf(sinceMs.toString(), top.toString()),
                         top
                     ).forEach { r ->
                         topArr.put(
@@ -104,7 +105,7 @@ private fun registerActivity() {
                     JSONObject()
                         .put("talker", talker)
                         .put("days", days)
-                        .put("since", since)
+                        .put("sinceMs", sinceMs)
                         .put("total", totalAll)
                         .put("sent", sentAll)
                         .put("recv", recvAll)
@@ -155,10 +156,10 @@ private fun registerHotWords() {
                 val minLen = args.optInt("min_len", 2).coerceIn(1, 8)
                 val sample = args.optInt("sample", 2000).coerceIn(50, 20000)
                 val minCount = args.optInt("min_count", 2).coerceIn(1, 100)
-                val since = System.currentTimeMillis() / 1000 - days * 86400L
+                val sinceMs = System.currentTimeMillis() - days * 86400_000L
 
                 val sql = StringBuilder("SELECT content FROM message WHERE type=1 AND createTime>=?")
-                val sqlArgs = ArrayList<String>(listOf(since.toString()))
+                val sqlArgs = ArrayList<String>(listOf(sinceMs.toString()))
                 if (talker.isNotEmpty()) {
                     sql.append(" AND talker=?")
                     sqlArgs.add(talker)
@@ -337,7 +338,7 @@ private fun registerExportCsv() {
                 val talker = args.optString("talker", "").trim()
                 val days = args.optInt("days", 30).coerceIn(1, 3650)
                 val limit = args.optInt("limit", 5000).coerceIn(1, 50000)
-                val since = System.currentTimeMillis() / 1000 - days * 86400L
+                val sinceMs = System.currentTimeMillis() - days * 86400_000L
                 val name = args.optString("file_name", "").ifBlank {
                     "wx_export_" + System.currentTimeMillis() + ".csv"
                 }
@@ -345,17 +346,19 @@ private fun registerExportCsv() {
                 val sql = StringBuilder(
                     "SELECT msgId,type,isSend,createTime,talker,content FROM message WHERE createTime>=?"
                 )
-                val sqlArgs = ArrayList<String>(listOf(since.toString()))
+                val sqlArgs = ArrayList<String>(listOf(sinceMs.toString()))
                 if (talker.isNotEmpty()) {
                     sql.append(" AND talker=?")
                     sqlArgs.add(talker)
                 }
-                sql.append(" ORDER BY createTime ASC LIMIT ?")
+                // 取「最近」的 limit 条（DESC），读出来再反转成时间升序写 CSV。
+                sql.append(" ORDER BY createTime DESC, msgId DESC LIMIT ?")
                 sqlArgs.add(limit.toString())
 
-                val rows = DbGateway.query(sql.toString(), sqlArgs.toTypedArray(), limit)
-                val dir = anAppContext()?.filesDir
+                val rows = DbGateway.query(sql.toString(), sqlArgs.toTypedArray(), limit).reversed()
+                val ctx = anAppContext()
                     ?: return@safe Jsons.err("拿不到微信 Context，无法写文件", "NO_CONTEXT")
+                val dir = ctx.filesDir
                 val file = java.io.File(dir, name)
                 val sb = StringBuilder("msgId,type,isSend,createTime,talker,content\n")
                 rows.forEach { r ->
@@ -368,9 +371,20 @@ private fun registerExportCsv() {
                 }
                 file.writeText(sb.toString(), Charsets.UTF_8)
 
+                // 再往微信自己的外部私有目录（/sdcard/Android/data/com.tencent.mm/files）落一份，
+                // 方便用 MT / 文件管理器直接取；外部目录不可用时只给私有路径，不算失败。
+                val extPath = runCatching {
+                    val d = ctx.getExternalFilesDir(null) ?: return@runCatching ""
+                    if (!d.exists() && !d.mkdirs()) return@runCatching ""
+                    val f = java.io.File(d, name)
+                    f.writeText(sb.toString(), Charsets.UTF_8)
+                    f.absolutePath
+                }.getOrNull().orEmpty()
+
                 Jsons.ok(
                     JSONObject()
                         .put("path", file.absolutePath)
+                        .put("extPath", extPath)
                         .put("rows", rows.size)
                         .put("bytes", file.length())
                         .put("talker", talker)
