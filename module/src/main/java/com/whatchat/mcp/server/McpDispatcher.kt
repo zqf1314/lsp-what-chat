@@ -8,13 +8,17 @@ import java.util.UUID
 /**
  * MCP JSON-RPC 分发器。
  *
- * 同时兼容两种协议语义（Eta 的 protocolMode=auto 会先试新版，失败再回落）：
- *  - modern（2026-xx）：无 session；带 resultType 字段标记结果完整
- *  - legacy（2024-11-05 / 2025-xx）：initialize 下发 Mcp-Session-Id，后续请求透传
+ * 同时兼容 Eta 的两种协议语义：
+ *  - LATEST = 2026-07-28：无状态；请求 params 里一定带 `_meta`（含 protocolVersion），
+ *    并且**每一个 result（tools/list 与 tools/call）都必须带 `resultType`**，
+ *    值为 "complete" 才被接受 —— 这是 Eta `McpRunContext.adaptResult()` 的硬校验：
+ *      if (lastProtocolVersion == LATEST && resultType != "complete") -> MCP_RESULT_TYPE_UNSUPPORTED
+ *    早期版本只给 tools/list 加了 resultType，导致 tools/call 一律被拒。
+ *  - LEGACY = 2025-11-25 / 2024-11-05 / 2025-03-26 / 2025-06-18：initialize 下发
+ *    Mcp-Session-Id，后续请求透传。
  *
- * 判定顺序：initialize 请求里的 protocolVersion → headers[MCP-Protocol-Version]
- * → params._meta → 本次连接已协商的模式。协商结果会记住，避免后续 tools/list
- * 因为客户端不带任何标记而被误判成 legacy、漏掉 resultType。
+ * 判定顺序：params._meta → headers[Mcp-Protocol-Version] → initialize 的 protocolVersion
+ * → 本次会话已协商的模式。
  */
 class McpDispatcher {
 
@@ -46,7 +50,9 @@ class McpDispatcher {
                 if (respBody.isNotEmpty()) {
                     runCatching { out.put(JSONObject(respBody)) }
                 }
-                if (code >= 400) return jsonResp(code, rpcError(obj.opt("id"), -32600, "invalid request"))
+                if (code >= 400) {
+                    return jsonResp(code, rpcError(obj.opt("id"), -32600, "invalid request"))
+                }
             }
             return jsonResp(200, out.toString())
         }
@@ -55,11 +61,11 @@ class McpDispatcher {
             return jsonResp(400, rpcError(null, -32700, "parse error"))
         }
         val (code, respBody) = dispatchOne(req, headers)
-        val headers2 = pendingSessionHeader?.let { sid ->
+        val extra = pendingSessionHeader?.let { sid ->
             pendingSessionHeader = null
             mapOf("Mcp-Session-Id" to sid)
         } ?: emptyMap()
-        return HttpResp(code, "application/json", respBody, headers2)
+        return HttpResp(code, "application/json", respBody, extra)
     }
 
     /** 返回 (httpCode, body)；body 为空表示无需响应体（通知类）。 */
@@ -87,31 +93,32 @@ class McpDispatcher {
             "notifications/roots/list_changed" -> Pair(202, "")
 
             "tools/list" -> Pair(200, handleToolsList(id, modern))
-            "tools/call" -> Pair(200, handleToolsCall(id, params))
-            "ping" -> Pair(200, rpcResult(id, JSONObject().put("ok", true)))
+            "tools/call" -> Pair(200, handleToolsCall(id, params, modern))
+            "ping" -> Pair(200, rpcResult(id, JSONObject().put("ok", true), modern))
 
             "resources/list" -> Pair(
                 200,
-                rpcResult(id, JSONObject().put("resources", JSONArray()))
+                rpcResult(id, JSONObject().put("resources", JSONArray()), modern)
             )
 
             "resources/templates/list" -> Pair(
                 200,
-                rpcResult(id, JSONObject().put("resourceTemplates", JSONArray()))
+                rpcResult(id, JSONObject().put("resourceTemplates", JSONArray()), modern)
             )
 
             "prompts/list" -> Pair(
                 200,
-                rpcResult(id, JSONObject().put("prompts", JSONArray()))
+                rpcResult(id, JSONObject().put("prompts", JSONArray()), modern)
             )
 
-            "logging/setLevel" -> Pair(200, rpcResult(id, JSONObject()))
+            "logging/setLevel" -> Pair(200, rpcResult(id, JSONObject(), modern))
 
             "completion/complete" -> Pair(
                 200,
                 rpcResult(
                     id,
-                    JSONObject().put("completion", JSONObject().put("values", JSONArray()))
+                    JSONObject().put("completion", JSONObject().put("values", JSONArray())),
+                    modern
                 )
             )
 
@@ -160,18 +167,15 @@ class McpDispatcher {
             pendingSessionHeader = sessionId()
         }
 
-        return Pair(200, rpcResult(id, result))
+        return Pair(200, rpcResult(id, result, modern))
     }
 
     private fun handleToolsList(id: Any?, modern: Boolean): String {
         val result = JSONObject().put("tools", ToolRegistry.toJsonArray())
-        if (modern) {
-            result.put("resultType", "complete")
-        }
-        return rpcResult(id, result)
+        return rpcResult(id, result, modern)
     }
 
-    private fun handleToolsCall(id: Any?, params: JSONObject): String {
+    private fun handleToolsCall(id: Any?, params: JSONObject, modern: Boolean): String {
         val name = params.optString("name", "")
         val tool = ToolRegistry.get(name)
             ?: return rpcError(id, -32602, "unknown tool: $name")
@@ -198,8 +202,7 @@ class McpDispatcher {
                 )
             )
             .put("isError", !ok)
-            .put("structuredContent", payload)
-        return rpcResult(id, result)
+        return rpcResult(id, result, modern)
     }
 
     // ------------------------------------------------------------------ utils
@@ -212,12 +215,23 @@ class McpDispatcher {
         return negotiated ?: false
     }
 
-    private fun rpcResult(id: Any?, result: JSONObject): String =
-        JSONObject()
+    /**
+     * 组 result。
+     *
+     * modern 模式下必须带 resultType=complete：Eta 的 McpRunContext 会在
+     * `lastProtocolVersion == 2026-07-28 && resultType != "complete"` 时直接判失败，
+     * 报 MCP_RESULT_TYPE_UNSUPPORTED。tools/list 和 tools/call 都要带。
+     */
+    private fun rpcResult(id: Any?, result: JSONObject, modern: Boolean): String {
+        if (modern) {
+            result.put("resultType", "complete")
+        }
+        return JSONObject()
             .put("jsonrpc", "2.0")
             .put("id", id ?: JSONObject.NULL)
             .put("result", result)
             .toString()
+    }
 
     private fun rpcError(id: Any?, code: Int, message: String): String =
         JSONObject()
@@ -243,6 +257,6 @@ class McpDispatcher {
     companion object {
         const val PROTO_MODERN = "2026-07-28"
         const val PROTO_LEGACY = "2025-11-25"
-        const val SERVER_VERSION = "0.2.0"
+        const val SERVER_VERSION = "0.2.1"
     }
 }

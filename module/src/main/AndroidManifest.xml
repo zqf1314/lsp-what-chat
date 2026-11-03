@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- targetSdk 30+ 的包可见性限制：不声明就查不到微信版本 -->
+    <queries>
+        <package android:name="com.tencent.mm" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:label="WhatChat MCP"
