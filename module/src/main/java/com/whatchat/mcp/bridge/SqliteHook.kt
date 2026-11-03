@@ -26,6 +26,12 @@ object SqliteHook {
     private val opened = ConcurrentHashMap<String, Any>()
 
     @Volatile
+    private var mainCaptured: Boolean = false
+
+    /** getPath() 的反射结果按类缓存：这个 hook 命中微信自身的每一次查询，不能每次都查方法表。 */
+    private val pathMethodCache = ConcurrentHashMap<Class<*>, java.lang.reflect.Method>()
+
+    @Volatile
     var installed: Boolean = false
         private set
 
@@ -36,6 +42,42 @@ object SqliteHook {
         hooked += hookClass(AOSP, cl)
         installed = hooked > 0
         WxLog.i("SqliteHook installed=$installed hooks=$hooked")
+    }
+
+    /**
+     * 兜底抓取：hook `rawQuery` / `execSQL`，用 thisObject 反查 getPath()。
+     *
+     * 实测微信 8.0.78（Android 16）根本没有走 WCDB 的构造器/静态 open 方法，
+     * 构造器全 hook 上也没抓到 EnMicroMsg.db，但该库确实已打开（/proc/<pid>/fd 可见）。
+     * 只要有一次查询，`thisObject` 就是那个 SQLiteDatabase 实例 —— 这是最可靠的落点。
+     */
+    private fun hookUsage(cls: Class<*>): Int {
+        val callback = object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                if (mainCaptured) return
+                val instance = param.thisObject ?: return
+                val path = pathOf(instance) ?: return
+                if (!path.contains("MicroMsg")) return
+                if (opened.put(path, instance) == null) {
+                    WxLog.i("db captured via usage: $path")
+                }
+                if (path.endsWith("EnMicroMsg.db")) mainCaptured = true
+            }
+        }
+        var n = 0
+        for (method in arrayOf("rawQuery", "rawQueryWithFactory", "execSQL")) {
+            n += runCatching { XposedBridge.hookAllMethods(cls, method, callback) }
+                .getOrNull()?.size ?: 0
+        }
+        WxLog.i("SqliteHook usage hooks=${cls.name} -> $n")
+        return n
+    }
+
+    private fun pathOf(instance: Any): String? {
+        val cls = instance.javaClass
+        val method = pathMethodCache[cls] ?: runCatching { cls.getMethod("getPath") }
+            .getOrNull()?.also { pathMethodCache[cls] = it } ?: return null
+        return runCatching { method.invoke(instance) as? String }.getOrNull()
     }
 
     private fun hookClass(name: String, cl: ClassLoader): Int {
@@ -65,6 +107,9 @@ object SqliteHook {
                 .onFailure { WxLog.e("hook $name#$method failed", it) }
                 .getOrNull()?.size ?: 0
         }
+
+        // 微信 8.0.78 实测不走上面这些入口，必须靠查询时反抓实例
+        n += hookUsage(cls)
 
         WxLog.i("SqliteHook $name hooks=$n")
         return n
