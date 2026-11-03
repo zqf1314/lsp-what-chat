@@ -98,3 +98,12 @@ git checkout v0.2.30-m3-baseline
 - 群管理（拉人/踢人/建群）未实现。
 - `wx_raw_sql` 默认不启用，且只允许白名单表。
 - CI 单轮 15–20 分钟，迭代节奏受此约束。
+
+## 9. 基准之后的增量
+
+| 版本 | 变更 | 实测 |
+|---|---|---|
+| 0.2.31 | 新增 `wx_open_add_friend`（进程内 startActivity 拉起微信 Activity，不需要 root） | `profile` 到位；`add`/`room` 直连会把微信进程带崩 |
+| 0.2.32 | 收敛：只保留 `profile`（ContactInfoUI）/ `sayhi`（SayHiWithSnsPermissionUI），`add`/`room` 返回 `BAD_MODE` | `profile→arrived=true`、`sayhi→arrived=true`、`add/room→BAD_MODE`，之后 `health` 仍 200 |
+
+> 基准工具数由 19 增至 20；新增工具不改变第 5 节任何不变量。
