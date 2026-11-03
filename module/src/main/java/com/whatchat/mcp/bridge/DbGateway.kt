@@ -1,7 +1,6 @@
 package com.whatchat.mcp.bridge
 
 import android.database.Cursor
-import android.database.sqlite.SQLiteDatabase
 import com.whatchat.mcp.WxEnv
 import com.whatchat.mcp.WxLog
 import java.lang.reflect.Field
@@ -10,52 +9,74 @@ import java.lang.reflect.Modifier
 /**
  * 微信数据库网关。
  *
- * L1：反射拿微信进程内已经打开的 SQLiteDatabase（不自己解密 EnMicroMsg.db）。
- *     好处是绕开 SQLCipher key 推导与 WAL 一致性问题，代价是依赖微信内部字段名。
+ * 拿句柄的两条路：
+ *  1. **SqliteHook**（首选）：hook WCDB/AOSP 的打开动作，直接拿到 path → instance。
+ *     微信用的是 `com.tencent.wcdb.database.SQLiteDatabase`，反射扫 `android.database.sqlite.SQLiteDatabase`
+ *     字段一个都扫不到（实测 fields=0），所以这是主路径。
+ *  2. 反射扫字段（兜底兼诊断）：按**类型名后缀** `SQLiteDatabase` 匹配，同时覆盖 WCDB 与 AOSP。
  *
- * 本类同时承担 M0 阶段的「坐标勘察」：probe() 会扫描微信 ClassLoader，
- * 把所有 SQLiteDatabase 类型的字段找出来并打日志，用于确定 8.0.78 的落点。
+ * 拿到实例后只做 rawQuery，不自己解密 EnMicroMsg.db —— 绕开 SQLCipher key 推导与 WAL 一致性问题。
  */
 object DbGateway {
 
-    private const val TAG = "DbGateway"
+    private const val MAIN_DB = "EnMicroMsg.db"
+    private const val ALT_DB = "rIndexMicroMsg.db"
 
     @Volatile
-    private var attached: SQLiteDatabase? = null
+    private var handle: Any? = null
 
     @Volatile
-    var probeReport: String = "not started"
-        private set
+    private var handlePath: String? = null
 
-    private val candidates = ArrayList<String>()
+    @Volatile
+    private var lastProbeNote: String = "not started"
+
+    private val fieldCandidates = ArrayList<String>()
+
+    val probeReport: String
+        get() = buildString {
+            append(lastProbeNote)
+            append(" hookDbs=")
+            append(SqliteHook.paths().size)
+            append(" attached=")
+            append(handlePath ?: "none")
+            if (fieldCandidates.isNotEmpty()) {
+                append(" candidates=")
+                append(fieldCandidates.take(8).joinToString(","))
+            }
+        }
 
     // ------------------------------------------------------------------ 对外 API
 
-    fun db(): SQLiteDatabase? {
-        attached?.let { if (it.isOpen) return it }
-        attached = null
-        return tryAttach()
+    fun db(): Any? {
+        handle?.let { if (SqliteHook.isOpen(it)) return it }
+        handle = null
+        handlePath = null
+
+        // 首选主库，其次索引库，最后任意一个（至少能让 wx_status 展示状态）
+        for (suffix in listOf(MAIN_DB, ALT_DB)) {
+            SqliteHook.find(suffix)?.let { return cache(it, suffix) }
+        }
+        SqliteHook.findAny()?.let { (path, instance) -> return cache(instance, path) }
+
+        return scanFieldsForHandle()
     }
 
     fun isReady(): Boolean = db() != null
 
     fun query(sql: String, args: Array<String>? = null, limit: Int = 200): List<Map<String, String>> {
-        val database = db() ?: throw IllegalStateException(
-            "微信数据库对象尚未就绪（probe=$probeReport）"
-        )
+        val instance = db() ?: throw IllegalStateException("微信数据库对象尚未就绪（$probeReport）")
+        val cursor = rawQuery(instance, sql, args)
+            ?: throw IllegalStateException("rawQuery 调用失败：${instance.javaClass.name}")
+
         val out = ArrayList<Map<String, String>>()
-        val cursor = database.rawQuery(sql, args)
         try {
             val names = cursor.columnNames
             var count = 0
             while (cursor.moveToNext() && count < limit) {
                 val row = LinkedHashMap<String, String>()
                 for (i in names.indices) {
-                    val value = try {
-                        cursor.getString(i)
-                    } catch (t: Throwable) {
-                        null
-                    }
+                    val value = runCatching { cursor.getString(i) }.getOrNull()
                     row[names[i]] = value ?: ""
                 }
                 out.add(row)
@@ -67,25 +88,70 @@ object DbGateway {
         return out
     }
 
-    // ------------------------------------------------------------------ 探测
+    // ------------------------------------------------------------------ 反射查询
 
-    /**
-     * 扫描微信 ClassLoader 下的所有类，找出 SQLiteDatabase 类型的字段。
-     * 结果会写进 probeReport，并缓存可用实例。
-     */
+    private fun rawQuery(instance: Any, sql: String, args: Array<String>?): Cursor? {
+        val cls = instance.javaClass
+
+        // WCDB / AOSP 都有的签名：rawQuery(String, String[])
+        runCatching { cls.getMethod("rawQuery", String::class.java, Array<String>::class.java) }
+            .getOrNull()?.let {
+                return it.invoke(instance, sql, args) as? Cursor
+            }
+
+        // 某些版本是 Object[]
+        runCatching { cls.getMethod("rawQuery", String::class.java, Array<Any>::class.java) }
+            .getOrNull()?.let {
+                @Suppress("UNCHECKED_CAST")
+                return it.invoke(instance, sql, args as Array<Any>?) as? Cursor
+            }
+
+        // 最后兜底：遍历所有 rawQuery 重载，挑参数个数为 2 的
+        cls.methods.firstOrNull {
+            it.name == "rawQuery" && it.parameterTypes.size == 2
+        }?.let { m ->
+            val second = m.parameterTypes[1]
+            val arg: Any? = when {
+                second == Array<String>::class.java -> args
+                second == Array<Any>::class.java -> args as Array<Any>?
+                else -> null
+            }
+            return runCatching { m.invoke(instance, sql, arg) as? Cursor }.getOrNull()
+        }
+
+        WxLog.e("rawQuery signature not found on ${cls.name}: ${cls.methods.count { it.name == "rawQuery" }} overloads")
+        return null
+    }
+
+    private fun cache(instance: Any, path: String): Any {
+        handle = instance
+        handlePath = path
+        return instance
+    }
+
+    // ------------------------------------------------------------------ 探测/诊断
+
+    /** 扫描 classpath，按类型名后缀找 `*SQLiteDatabase` 字段，仅用于诊断与兜底。 */
     fun probe(): String {
         val started = System.currentTimeMillis()
         val classLoader = WxEnv.classLoader
         if (classLoader == null) {
-            probeReport = "no classloader"
+            lastProbeNote = "no classloader"
+            return probeReport
+        }
+
+        // 1) hook 已经抓到就直接收工
+        db()?.let {
+            lastProbeNote = "probe: via hook costMs=${System.currentTimeMillis() - started}"
+            WxLog.i("probe: attached from hook path=$handlePath")
             return probeReport
         }
 
         val classNames = runCatching { collectClassNames(classLoader) }.getOrElse { emptyList() }
-        WxLog.i("probe: scanned dex entries = ${classNames.size}")
+        WxLog.i("probe: classpath entries = ${classNames.size}")
 
         var scanned = 0
-        var dbFieldHits = 0
+        var hits = 0
 
         for (name in classNames) {
             if (!name.startsWith("com.tencent.mm.")) continue
@@ -94,47 +160,54 @@ object DbGateway {
             val clazz = runCatching { Class.forName(name, false, classLoader) }.getOrNull() ?: continue
             val fields = runCatching { clazz.declaredFields }.getOrNull() ?: continue
             for (field in fields) {
-                val type = field.type ?: continue
-                if (!SQLiteDatabase::class.java.isAssignableFrom(type)) continue
-                dbFieldHits++
+                val typeName = field.type?.name ?: continue
+                if (!typeName.endsWith("SQLiteDatabase")) continue
+                hits++
                 val static = Modifier.isStatic(field.modifiers)
                 val label = "${clazz.name}#${field.name}${if (static) " (static)" else ""}"
-                candidates.add(label)
-                WxLog.i("probe hit: $label")
+                if (!fieldCandidates.contains(label)) fieldCandidates.add(label)
+                WxLog.i("probe hit: $label : ${field.type.name}")
 
-                // 静态字段可以直接取；实例字段需要宿主单例
-                if (attached == null && static) {
+                if (static && handle == null) {
                     val value = runCatching { field.isAccessible = true; field.get(null) }.getOrNull()
-                    if (value is SQLiteDatabase && value.isOpen) {
-                        attached = value
+                    if (value != null && SqliteHook.isOpen(value)) {
+                        cache(value, label)
                         WxLog.i("probe: attached via static field $label")
                     }
                 }
             }
         }
 
-        // 静态字段没命中时，尝试常见单例模式
-        if (attached == null) {
-            trySingletonPatterns(classLoader)
-        }
+        if (handle == null) trySingletonPatterns(classLoader)
 
         val cost = System.currentTimeMillis() - started
-        probeReport = buildString {
-            append("scanned=$scanned fields=$dbFieldHits costMs=$cost ")
-            append("attached=")
-            append(attached?.path ?: "none")
-            if (candidates.isNotEmpty()) {
-                append(" candidates=")
-                append(candidates.take(12).joinToString(","))
-            }
-        }
+        lastProbeNote = "probe: scanned=$scanned dbFields=$hits costMs=$cost"
         WxLog.i("probe done: $probeReport")
         return probeReport
     }
 
+    private fun scanFieldsForHandle(): Any? {
+        val classLoader = WxEnv.classLoader ?: return null
+        for (label in fieldCandidates) {
+            val clean = label.removeSuffix(" (static)")
+            val parts = clean.split("#")
+            if (parts.size != 2) continue
+            val clazz = runCatching { Class.forName(parts[0], false, classLoader) }.getOrNull() ?: continue
+            val field: Field = runCatching { clazz.getDeclaredField(parts[1]) }.getOrNull() ?: continue
+            val value = runCatching {
+                field.isAccessible = true
+                if (Modifier.isStatic(field.modifiers)) field.get(null)
+                else field.get(findHostInstance(clazz) ?: return null)
+            }.getOrNull() ?: continue
+            if (SqliteHook.isOpen(value)) return cache(value, label)
+        }
+        return null
+    }
+
     private fun trySingletonPatterns(classLoader: ClassLoader) {
-        for (label in candidates.toList()) {
-            val parts = label.substringBefore(" (static)").split("#")
+        for (label in fieldCandidates.toList()) {
+            val clean = label.removeSuffix(" (static)")
+            val parts = clean.split("#")
             if (parts.size != 2) continue
             val clazz = runCatching { Class.forName(parts[0], true, classLoader) }.getOrNull() ?: continue
             val field = runCatching { clazz.getDeclaredField(parts[1]) }.getOrNull() ?: continue
@@ -142,9 +215,9 @@ object DbGateway {
 
             runCatching { field.isAccessible = true }
             val host = findHostInstance(clazz) ?: continue
-            val value = runCatching { field.get(host) }.getOrNull()
-            if (value is SQLiteDatabase && value.isOpen) {
-                attached = value
+            val value = runCatching { field.get(host) }.getOrNull() ?: continue
+            if (SqliteHook.isOpen(value)) {
+                cache(value, label)
                 WxLog.i("probe: attached via singleton ${clazz.name}.${field.name}")
                 return
             }
@@ -152,44 +225,14 @@ object DbGateway {
     }
 
     private fun findHostInstance(clazz: Class<*>): Any? {
-        // 常见的单例字段名
         val names = arrayOf("INSTANCE", "instance", "ʻ", "ʽ", "ˊ", "ـ")
         for (name in names) {
-            val field: Field? = runCatching { clazz.getDeclaredField(name) }.getOrNull()
-            if (field == null) continue
+            val field: Field = runCatching { clazz.getDeclaredField(name) }.getOrNull() ?: continue
             if (!Modifier.isStatic(field.modifiers)) continue
-            val value = runCatching { field.isAccessible = true; field.get(null) }.getOrNull()
-            if (value != null && clazz.isInstance(value)) return value
+            val value = runCatching { field.isAccessible = true; field.get(null) }.getOrNull() ?: continue
+            if (clazz.isInstance(value)) return value
         }
-        // Kotlin object 的 INSTANCE
-        return runCatching {
-            val f = clazz.getDeclaredField("INSTANCE")
-            f.isAccessible = true
-            f.get(null)
-        }.getOrNull()
-    }
-
-    private fun tryAttach(): SQLiteDatabase? {
-        // 已探测过就直接用候选重试一次（微信可能重建了 db）
-        return runCatching {
-            val cl = WxEnv.classLoader ?: return null
-            for (label in candidates) {
-                val clean = label.removeSuffix(" (static)")
-                val parts = clean.split("#")
-                if (parts.size != 2) continue
-                val clazz = Class.forName(parts[0], false, cl)
-                val field = clazz.getDeclaredField(parts[1])
-                field.isAccessible = true
-                val value: Any? = if (Modifier.isStatic(field.modifiers)) {
-                    field.get(null)
-                } else {
-                    val host = findHostInstance(clazz) ?: continue
-                    field.get(host)
-                }
-                if (value is SQLiteDatabase && value.isOpen) return value
-            }
-            null
-        }.getOrNull()
+        return null
     }
 
     private fun collectClassNames(classLoader: ClassLoader): List<String> {
