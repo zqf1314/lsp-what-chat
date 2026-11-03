@@ -579,7 +579,7 @@ object WxSender {
             return SendResult(
                 true, true, false, target, xml.length, 0,
                 System.currentTimeMillis() - started,
-                "dry_run：未发送。$probeBuilder()；xml=" + xml.take(120)
+                "dry_run：未发送。${probeBuilder()}；xml=" + xml.take(120)
             )
         }
         checkThrottle()?.let { return fail(it) }
@@ -652,7 +652,7 @@ object WxSender {
         }
         listOf(setTalker, setContent, setType, send).forEach { it.isAccessible = true }
         setTalker.invoke(builder, talker)
-        setContent.invoke(builder, xml)
+        setContent.invoke(builder, content)
         setType.invoke(builder, msgType)
         send.invoke(builder)
         return null

@@ -45,7 +45,12 @@
 | `wx_search_contacts` | 搜索联系人 | ✅ |
 | `wx_group_members` | 群成员与群主 | ✅ |
 | `wx_send_text` | 发送文本（默认 `dry_run=true`，只构造不发送） | ❌ |
+| `wx_send_image` | 发送本地图片（`type=3`，落库回查 `verified/msgId`） | ❌ |
+| `wx_send_file` | 发送本地文件（`WXFileObject→WXMediaMessage→k0.F`，落库回查） | ❌ |
+| `wx_send_quote` | 引用回复（`refermsg` appmsg，`type=49`，走 `q61.t1` builder） | ❌ |
+| `wx_send_card` | 发送联系人名片（`type=42`，昵称缺省从 `rcontact` 补） | ❌ |
 | `wx_send_limits` | 发送约束与当前限流用量 | ✅ |
+| `wx_probe_send` | 反射勘察发送核方法表（诊断用） | ✅ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
 ## 让微信不被冻结（重要，否则 MCP 会“连上不回”）
