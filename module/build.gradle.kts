@@ -1,7 +1,16 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// 固定签名：CI 里由 secret 解出一份 keystore，保证每次构建指纹一致、可覆盖升级。
+// 本地没有 keystore 时自动退回 debug 签名（仅用于临时验证）。
+val signingKsPath: String? = System.getenv("SIGNING_KEYSTORE")
+val signingStorePass: String = System.getenv("SIGNING_STORE_PASS") ?: ""
+val signingKeyAlias: String = System.getenv("SIGNING_KEY_ALIAS") ?: "whatchat"
+val hasStableSigning: Boolean = signingKsPath != null && File(signingKsPath).exists()
 
 android {
     namespace = "com.whatchat.mcp"
@@ -15,11 +24,25 @@ android {
         versionName = "0.2.0"
     }
 
+    signingConfigs {
+        if (hasStableSigning) {
+            create("stable") {
+                storeFile = File(signingKsPath!!)
+                storePassword = signingStorePass
+                keyAlias = signingKeyAlias
+                keyPassword = signingStorePass
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // 模块不参与 Play 分发，debug 密钥足够；指纹固定，可覆盖安装
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasStableSigning) {
+                signingConfigs.getByName("stable")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

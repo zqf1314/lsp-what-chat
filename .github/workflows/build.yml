@@ -36,7 +36,22 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Assemble release (debug-signed)
+      - name: Decode signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/whatchat.keystore"
+            printf 'keystore ready: '; ls -l "$RUNNER_TEMP/whatchat.keystore"
+          else
+            echo "no keystore secret, will fall back to debug signing"
+          fi
+
+      - name: Assemble release
+        env:
+          SIGNING_KEYSTORE: ${{ runner.temp }}/whatchat.keystore
+          SIGNING_STORE_PASS: ${{ secrets.SIGNING_STORE_PASS }}
+          SIGNING_KEY_ALIAS: whatchat
         run: gradle :module:assembleRelease --no-daemon --stacktrace
 
       - name: Show outputs
