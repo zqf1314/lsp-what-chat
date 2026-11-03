@@ -429,7 +429,7 @@ object WxSender {
 
         // WXFileObject：优先 String 构造器，退回无参 + setFilePath
         val fileObj = runCatching {
-            val c = fileObjCls.constructors.firstOrNull { it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }
+            val c = fileObjCls.declaredConstructors.firstOrNull { it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }
             if (c != null) {
                 c.isAccessible = true
                 c.newInstance(path)
@@ -445,7 +445,7 @@ object WxSender {
 
         // WXMediaMessage：优先 (WXFileObject) 构造器，退回无参 + 反射写 media 字段
         val msg = runCatching {
-            val c = mediaCls.constructors.firstOrNull { it.parameterCount == 1 && it.parameterTypes[0].isInstance(fileObj) }
+            val c = mediaCls.declaredConstructors.firstOrNull { it.parameterCount == 1 && it.parameterTypes[0].isInstance(fileObj) }
             if (c != null) {
                 c.isAccessible = true
                 c.newInstance(fileObj)
