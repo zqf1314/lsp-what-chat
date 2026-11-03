@@ -72,7 +72,7 @@ class ConfigActivity : Activity() {
         val port = ServerController.PORT
 
         return buildString {
-            appendLine("WhatChat MCP 0.2.4")
+            appendLine("WhatChat MCP 0.2.5")
             appendLine("──────────────")
             appendLine("MCP 地址：http://127.0.0.1:$port/mcp")
             appendLine("健康检查：http://127.0.0.1:$port/health")

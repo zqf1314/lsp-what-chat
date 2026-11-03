@@ -31,6 +31,9 @@ object SqliteHook {
     /** getPath() 的反射结果按类缓存：这个 hook 命中微信自身的每一次查询，不能每次都查方法表。 */
     private val pathMethodCache = ConcurrentHashMap<Class<*>, java.lang.reflect.Method>()
 
+    /** 已被发现流程挂过 hook 的类名，避免重复挂。 */
+    private val hookedClasses: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     @Volatile
     var installed: Boolean = false
         private set
@@ -42,6 +45,40 @@ object SqliteHook {
         hooked += hookClass(AOSP, cl)
         installed = hooked > 0
         WxLog.i("SqliteHook installed=$installed hooks=$hooked")
+        scheduleDiscovery(cl)
+    }
+
+    /**
+     * 运行期发现：枚举 classpath 里所有以 `SQLiteDatabase` 结尾的类，逐个挂 usage hook。
+     *
+     * 微信 8.0.78 实际用的 DB 类并不是 `com.tencent.wcdb.database.SQLiteDatabase`（那个类上
+     * 连 rawQuery 都挂不到），所以不猜类名，直接按名字后缀全网扫。
+     */
+    private fun scheduleDiscovery(cl: ClassLoader) {
+        Thread({
+            for (delay in longArrayOf(2_000L, 8_000L, 20_000L)) {
+                runCatching { Thread.sleep(delay) }
+                if (mainCaptured) return@Thread
+                runCatching { discoverAndHook(cl) }
+                    .onFailure { WxLog.e("sqlite discovery failed", it) }
+            }
+        }, "whatchat-sqlite-discovery").apply { isDaemon = true }.start()
+    }
+
+    private fun discoverAndHook(cl: ClassLoader) {
+        val names = Classpath.names(cl)
+        val hits = names.filter { it.endsWith("SQLiteDatabase") || it.endsWith("SQLiteConnection") }
+        if (hits.isEmpty()) {
+            WxLog.w("sqlite discovery: no candidate class in ${names.size} entries")
+            return
+        }
+        for (name in hits) {
+            if (hookedClasses.contains(name)) continue
+            val cls = runCatching { Class.forName(name, false, cl) }.getOrNull() ?: continue
+            hookedClasses.add(name)
+            val n = hookUsage(cls)
+            WxLog.i("sqlite discovery hooked $name -> $n")
+        }
     }
 
     /**
@@ -75,9 +112,22 @@ object SqliteHook {
 
     private fun pathOf(instance: Any): String? {
         val cls = instance.javaClass
+
+        // 1) 标准 API：getPath()
         val method = pathMethodCache[cls] ?: runCatching { cls.getMethod("getPath") }
-            .getOrNull()?.also { pathMethodCache[cls] = it } ?: return null
-        return runCatching { method.invoke(instance) as? String }.getOrNull()
+            .getOrNull()?.also { pathMethodCache[cls] = it }
+        if (method != null) {
+            runCatching { method.invoke(instance) as? String }.getOrNull()?.let { return it }
+        }
+
+        // 2) 兜底：AOSP 的 public 字段 mPath，或混淆后的 path 字段
+        for (fieldName in arrayOf("mPath", "path", "a")) {
+            val field = runCatching { cls.getDeclaredField(fieldName) }.getOrNull() ?: continue
+            runCatching { field.isAccessible = true }.getOrNull()
+            val value = runCatching { field.get(instance) as? String }.getOrNull()
+            if (value != null && value.contains('/')) return value
+        }
+        return null
     }
 
     private fun hookClass(name: String, cl: ClassLoader): Int {
