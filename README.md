@@ -28,8 +28,8 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | 8.0.78 坐标勘察（DbGateway.probe 扫描 `SQLiteDatabase` 字段） | 代码就绪，待真机验证 |
-| M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪 |
+| M0 | 8.0.78 坐标勘察（DbGateway.probe 扫描 `SQLiteDatabase` 字段） | 代码就绪，APK 已装机，待启用模块后验证 `dbProbe` |
+| M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
 | M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 待开工 |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
 
@@ -50,7 +50,20 @@
 
 推到 `main` 后由 GitHub Actions 自动构建，产物在 Actions → Artifacts → `whatchat-mcp-apk`。
 
-本地构建需要 JDK 17 + Android SDK 34：
+- 仓库：<https://github.com/zqf1314/lsp-what-chat>
+- 工作流：`.github/workflows/build.yml`（ubuntu-latest + JDK 17 + SDK 34 + Gradle 8.7）
+- 签名：release 用 debug 密钥（指纹固定，可覆盖升级）；要换正式签名再加 keystore + CI secrets
+
+命令行取最新产物：
+
+```bash
+gh run download -R zqf1314/lsp-what-chat -n whatchat-mcp-apk -D dist
+```
+
+> CI 注意：`android-actions/setup-android@v3` 的默认 `packages: tools platform-tools` 在新版 sdkmanager 里已无 `tools` 包，会直接报 `Failed to find package 'tools'`，所以 workflow 里显式写死
+> `packages: 'platform-tools build-tools;34.0.0 platforms;android-34'`。
+
+本地构建需要 JDK 17 + Android SDK 34（当前开发机没有 SDK，全程走云端）：
 
 ```bash
 gradle :module:assembleRelease
@@ -62,7 +75,7 @@ gradle :module:assembleRelease
 2. LSPosed 中启用 **WhatChat MCP**，作用域勾选 **微信**。
 3. 强制停止微信并重新打开。
 4. 校验：`adb shell curl -s http://127.0.0.1:18765/health` → `{"ok":true,...}`
-   或看日志：`adb logcat -s WhatChatMCP`
+   （没 curl 就用 `adb shell "toybox nc 127.0.0.1 18765"` 手动发一行请求，或直接看 `adb logcat -s WhatChatMCP`）
 5. 打开模块 App 可看到 MCP 地址与运行状态。
 
 ## 在 Eta 中接入
