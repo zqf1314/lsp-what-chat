@@ -296,6 +296,8 @@ fun registerSendTools() {
             }
         }
     )
+}
+
 
 // ---------------------------------------------------------------- 引用辅助
 
@@ -326,7 +328,6 @@ private fun senderOf(row: Map<String, String>): String {
     val content = row["content"] ?: ""
     val idx = content.indexOf(":\n")
     return if (idx in 1..64) content.substring(0, idx) else ""
-}
 }
 
 /** at_wxids 支持 JSON 数组 / 逗号分隔字符串 / 缺省。 */
