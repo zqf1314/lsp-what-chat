@@ -74,6 +74,7 @@ object WxSender {
         text: String,
         atWxIds: List<String> = emptyList(),
         dryRun: Boolean = true,
+        msgType: Int = MSG_TYPE,
     ): SendResult {
         val started = System.currentTimeMillis()
         val target = talker.trim()
@@ -337,6 +338,143 @@ object WxSender {
         )
     }
 
+
+    // ------------------------------------------------------------------ 文件 / 引用
+
+    /** 文件发送：同一张发送核方法表上的 Kj(String talker, String path, String fileName)。 */
+    private const val FILE_METHOD = "Kj"
+
+    /** 引用回复走 appmsg：外层消息 type=49，内部 <appmsg><type>57</type><refermsg>… */
+    private const val QUOTE_MSG_TYPE = 49
+    private const val QUOTE_APPMSG_TYPE = 57
+
+    private const val UNREADABLE_HINT = "当前进程无法读取该文件（Android 分区存储限制）："
+
+    /** 被引用的那条消息（字段语义对齐微信 refermsg）。 */
+    data class QuoteRef(
+        val svrId: Long,
+        val chatUsr: String,
+        val fromUsr: String,
+        val type: Int,
+        val content: String,
+        val displayName: String,
+        val createTimeMs: Long,
+    )
+
+    /** 发文件。坐标：lt5.d5.Kj(talker, path, fileName)（运行时方法表勘察确认）。 */
+    fun sendFile(talker: String, filePath: String, fileName: String? = null, dryRun: Boolean = true): MediaResult {
+        val started = System.currentTimeMillis()
+        val target = talker.trim()
+        val path = filePath.trim()
+        if (target.isEmpty()) return mediaFail(started, dryRun, target, path, 0L, "talker 不能为空")
+        if (path.isEmpty()) return mediaFail(started, dryRun, target, path, 0L, "path 不能为空")
+        val file = java.io.File(path)
+        if (!file.exists()) return mediaFail(started, dryRun, target, path, 0L, "文件不存在：$path")
+        if (!file.isFile) return mediaFail(started, dryRun, target, path, 0L, "不是普通文件：$path")
+        if (!file.canRead()) {
+            return mediaFail(
+                started, dryRun, target, path, 0L,
+                UNREADABLE_HINT + path +
+                    "。请改用微信自己可读的路径（微信保存过的文件、或微信数据目录下的文件）；chmod / chown 对本进程无效。"
+            )
+        }
+        val size = runCatching { file.length() }.getOrDefault(0L)
+        val name = fileName?.trim().takeUnless { it.isNullOrEmpty() } ?: file.name
+
+        if (dryRun) {
+            val probe = runCatching { probeCoreMethod(FILE_METHOD, 3) }.getOrElse { "probe 失败：${it.message}" }
+            return MediaResult(
+                true, true, false, target, path, size, System.currentTimeMillis() - started,
+                "dry_run：未发送。$probe"
+            )
+        }
+
+        val throttle = checkThrottle()
+        if (throttle != null) return mediaFail(started, false, target, path, size, throttle)
+
+        val err = runCatching { WxEnv.callOnMain(20_000L) { sendFileNow(target, path, name) } }
+            .getOrElse { "主线程执行失败：${it.javaClass.simpleName}: ${it.message}" }
+        val cost = System.currentTimeMillis() - started
+        if (err != null) {
+            WxLog.e("sendFile: $err")
+            return mediaFail(started, false, target, path, size, err)
+        }
+        WxLog.i("sendFile: sent talker=$target name=$name size=$size cost=${cost}ms")
+        return MediaResult(true, false, true, target, path, size, cost, "已提交给发送核心（不代表对方已收到）")
+    }
+
+    private fun sendFileNow(talker: String, path: String, name: String): String? {
+        val core = resolveSendCore()
+            ?: return "找不到发送核心 $CORE_CLASS（$CORE_ENUM 枚举=" + enumSummary() + "）"
+        val m = findCoreMethod(core.javaClass, FILE_METHOD, 3)
+            ?: return core.javaClass.name + " 上没有 $FILE_METHOD/3，候选：" + candidateSummary(core, 3)
+        m.isAccessible = true
+        return runCatching { m.invoke(core, talker, path, name) }
+            .fold({ null }, { "调用 $FILE_METHOD 失败：${it.javaClass.simpleName}: ${it.message}" })
+    }
+
+    /** 发引用回复：自拼 refermsg appmsg，再按 type=49 走同一条发送链。 */
+    fun sendQuote(
+        talker: String,
+        text: String,
+        ref: QuoteRef,
+        atWxIds: List<String> = emptyList(),
+        dryRun: Boolean = true,
+    ): SendResult {
+        val xml = buildQuoteXml(text.trim(), ref, atWxIds)
+        val r = sendText(talker, xml, atWxIds, dryRun, QUOTE_MSG_TYPE)
+        return if (!r.ok || r.dryRun) r else r.copy(
+            message = "已提交引用回复（svrid=${ref.svrId}，appmsg ${r.textLength} 字符）"
+        )
+    }
+
+    private fun buildQuoteXml(text: String, ref: QuoteRef, atWxIds: List<String>): String {
+        val at = if (atWxIds.isEmpty()) "" else
+            "<msgsource><atuserlist><![CDATA[" + atWxIds.joinToString(",") + "]]></atuserlist></msgsource>"
+        val quoted = if (ref.content.length > 1200) ref.content.substring(0, 1200) else ref.content
+        return buildString {
+            append("<msg><appmsg appid=\"\" sdkver=\"0\">")
+            append("<title>").append(xmlEscape(text)).append("</title>")
+            append("<type>").append(QUOTE_APPMSG_TYPE).append("</type>")
+            append("<refermsg>")
+            append("<type>").append(ref.type).append("</type>")
+            append("<svrid>").append(ref.svrId).append("</svrid>")
+            append("<fromusr>").append(xmlEscape(ref.fromUsr)).append("</fromusr>")
+            append("<chatusr>").append(xmlEscape(ref.chatUsr)).append("</chatusr>")
+            append("<displayname>").append(xmlEscape(ref.displayName)).append("</displayname>")
+            append("<content>").append(xmlEscape(quoted)).append("</content>")
+            append("<createtime>").append(ref.createTimeMs / 1000).append("</createtime>")
+            append("</refermsg>")
+            append(at)
+            append("</appmsg></msg>")
+        }
+    }
+
+    private fun xmlEscape(value: String): String = value
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", """)
+
+    private fun findCoreMethod(cls: Class<*>, name: String, argc: Int): Method? =
+        (cls.methods.asList() + cls.declaredMethods.asList())
+            .distinct()
+            .firstOrNull { m ->
+                m.name == name && m.parameterCount == argc &&
+                    m.parameterTypes.all { it == String::class.java }
+            }
+
+    private fun candidateSummary(core: Any, argc: Int): String =
+        core.javaClass.declaredMethods.filter { it.parameterCount == argc }.take(8)
+            .joinToString(";") { m -> m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")" }
+
+    private fun probeCoreMethod(name: String, argc: Int): String {
+        val core = resolveSendCore() ?: return "core=$CORE_CLASS missing enum=" + enumSummary()
+        val m = findCoreMethod(core.javaClass, name, argc)
+            ?: return "core ok，但没找到 $name/$argc，候选：" + candidateSummary(core, argc)
+        return "core ok method=" + m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")"
+    }
+
     private fun enumSummary(): String = runCatching {
         val cl = WxEnv.classLoader ?: return@runCatching "no-cl"
         val e = Class.forName(CORE_ENUM, true, cl)
@@ -361,12 +499,12 @@ object WxSender {
     )
 
     /** 参考实现整条发送链都跑在微信主线程；构造消息对象也放主线程，避免碰到主线程断言。 */
-    private fun buildOnMain(talker: String, text: String, atWxIds: List<String>): BuildOutcome {
+    private fun buildOnMain(talker: String, text: String, atWxIds: List<String>, msgType: Int = MSG_TYPE): BuildOutcome {
         val holder = arrayOfNulls<Any?>(1)
         val err = arrayOfNulls<Throwable>(1)
         val done = WxEnv.callOnMain(15_000L) {
             try {
-                holder[0] = buildNetScene(talker, text, atWxIds)
+                holder[0] = buildNetScene(talker, text, atWxIds, msgType)
             } catch (t: Throwable) {
                 err[0] = t
             }
@@ -380,7 +518,7 @@ object WxSender {
         }
     }
 
-    private fun buildNetScene(talker: String, text: String, atWxIds: List<String>): Any {
+    private fun buildNetScene(talker: String, text: String, atWxIds: List<String>, msgType: Int = MSG_TYPE): Any {
         val cl = WxEnv.classLoader ?: throw IllegalStateException("classLoader 未就绪")
         val cls = Class.forName(MSG_CLASS, true, cl)
 
@@ -403,9 +541,9 @@ object WxSender {
             }
             when {
                 p[4] == Any::class.java || p[4] == Object::class.java || Map::class.java.isAssignableFrom(p[4]) ->
-                    withMap.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, map, ""))
+                    withMap.add(c to arrayOf<Any?>(talker, text, msgType, MSG_SCENE, map, ""))
                 p[4] == java.lang.Long::class.java || p[4] == Long::class.javaPrimitiveType ->
-                    withLong.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, 0L, ""))
+                    withLong.add(c to arrayOf<Any?>(talker, text, msgType, MSG_SCENE, 0L, ""))
             }
         }
         val candidates: List<Pair<Constructor<*>, Array<Any?>>> =

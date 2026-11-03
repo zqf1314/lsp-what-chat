@@ -174,11 +174,159 @@ fun registerSendTools() {
             Tools.safe {
                 val cls = args.optString("cls", "").ifBlank { "lt5.d5" }
                 val max = args.optInt("max", 200).coerceIn(1, 600)
-                val dump = WxSender.dumpMethods(cls, max)
-                Jsons.ok(JSONObject().put("cls", cls).put("dump", dump))
+    ToolRegistry.register(
+        ToolDef(
+            name = "wx_send_file",
+            title = "发送文件",
+            description = "给指定会话发一个本地文件（走微信发送核心 lt5.d5.Kj，不经 UI）。" +
+                "默认 dry_run=true 只探测方法是否存在；要真发必须 dry_run=false。",
+            inputSchema = Schema.obj(
+                required = listOf("talker", "path"),
+                props = listOf(
+                    "talker" to Schema.str("会话标识：好友 wxid，或群聊 xxx@chatroom"),
+                    "path" to Schema.str("文件绝对路径（必须微信进程可读）"),
+                    "file_name" to Schema.str("可选：展示用文件名，缺省取文件本身的 name"),
+                    "dry_run" to Schema.bool("仅探测不发送，默认 true"),
+                )
+            ),
+            readOnly = false,
+            destructive = false,
+            idempotent = false,
+            openWorld = true,
+        ) { args ->
+            Tools.safe {
+                val talker = args.optString("talker", "")
+                if (talker.isBlank()) return@safe Jsons.err("talker 不能为空", "BAD_ARGUMENT")
+                val path = args.optString("path", "")
+                if (path.isBlank()) return@safe Jsons.err("path 不能为空", "BAD_ARGUMENT")
+                val name = args.optString("file_name", "")
+                val dryRun = if (args.has("dry_run")) args.optBoolean("dry_run", true) else true
+
+                val before = if (dryRun) 0L else latestMsgId(talker)
+                val r = WxSender.sendFile(talker, path, name, dryRun)
+                val hit = if (r.ok && !r.dryRun) waitNewMessage(talker, before, 3000L) else null
+                val data = JSONObject()
+                    .put("talker", r.talker)
+                    .put("path", r.path)
+                    .put("sizeBytes", r.sizeBytes)
+                    .put("dryRun", r.dryRun)
+                    .put("submitted", r.submitted)
+                    .put("verified", hit != null)
+                    .put("msgId", hit?.get("msgId") ?: "")
+                    .put("msgType", hit?.get("type") ?: "")
+                    .put("costMs", r.costMs)
+                    .put("message", if (hit != null) r.message + "；已入库 msgId=" + hit["msgId"] + " type=" + hit["type"] else r.message)
+                if (r.ok) Jsons.ok(data) else Jsons.err(r.message, "SEND_FAILED").put("data", data)
             }
         }
     )
+
+    ToolRegistry.register(
+        ToolDef(
+            name = "wx_send_quote",
+            title = "引用回复",
+            description = "引用某条历史消息发回复（自拼 refermsg appmsg，外层 type=49 走发送链）。" +
+                "quote_id 传被引用消息的 msgId 或 msgSvrId，其余字段自动从 message 表补齐，可用 quote_* 参数覆盖。" +
+                "默认 dry_run=true。",
+            inputSchema = Schema.obj(
+                required = listOf("talker", "text", "quote_id"),
+                props = listOf(
+                    "talker" to Schema.str("会话标识：好友 wxid，或群聊 xxx@chatroom"),
+                    "text" to Schema.str("回复正文"),
+                    "quote_id" to Schema.str("被引用消息的 msgId 或 msgSvrId"),
+                    "quote_from_usr" to Schema.str("可选：覆盖 refermsg/fromusr"),
+                    "quote_chat_usr" to Schema.str("可选：覆盖 refermsg/chatusr，缺省等于 talker"),
+                    "quote_display_name" to Schema.str("可选：被引用消息发送者显示名"),
+                    "quote_content" to Schema.str("可选：覆盖 refermsg/content，缺省取库里原文（截断 1200 字）"),
+                    "quote_type" to Schema.int("可选：覆盖被引用消息类型，缺省取库里 type"),
+                    "at_wxids" to Schema.str("需要 @ 的 wxid，逗号分隔；不需要留空"),
+                    "dry_run" to Schema.bool("仅组装不发送，默认 true"),
+                )
+            ),
+            readOnly = false,
+            destructive = false,
+            idempotent = false,
+            openWorld = true,
+        ) { args ->
+            Tools.safe {
+                val talker = args.optString("talker", "")
+                if (talker.isBlank()) return@safe Jsons.err("talker 不能为空", "BAD_ARGUMENT")
+                val text = args.optString("text", "")
+                if (text.isBlank()) return@safe Jsons.err("text 不能为空", "BAD_ARGUMENT")
+                val qid = args.optString("quote_id", "").trim()
+                if (qid.isEmpty()) return@safe Jsons.err("quote_id 不能为空", "BAD_ARGUMENT")
+                val dryRun = if (args.has("dry_run")) args.optBoolean("dry_run", true) else true
+
+                val row = lookupMessage(qid)
+                    ?: return@safe Jsons.err("找不到被引用消息：$qid（msgId/msgSvrId 都不匹配）", "NOT_FOUND")
+                val qType = args.optInt("quote_type", row["type"]?.toIntOrNull() ?: 1)
+                val isSend = row["isSend"] == "1"
+                val fromUsr = args.optString("quote_from_usr", "")
+                    .ifBlank { if (isSend) selfWxid() else senderOf(row) }
+                val chatUsr = args.optString("quote_chat_usr", "").ifBlank { talker }
+                val display = args.optString("quote_display_name", "")
+                val content = args.optString("quote_content", "").ifBlank { row["content"] ?: "" }
+
+                val ref = WxSender.QuoteRef(
+                    svrId = row["msgSvrId"]?.toLongOrNull() ?: 0L,
+                    chatUsr = chatUsr,
+                    fromUsr = fromUsr,
+                    type = qType,
+                    content = content,
+                    displayName = display,
+                    createTimeMs = row["createTime"]?.toLongOrNull() ?: 0L,
+                )
+                val before = if (dryRun) 0L else latestMsgId(talker)
+                val r = WxSender.sendQuote(talker, text, ref, parseAtList(args), dryRun)
+                val hit = if (r.ok && !r.dryRun) waitNewMessage(talker, before, 3000L) else null
+                val data = JSONObject()
+                    .put("talker", r.talker)
+                    .put("quoteSvrId", ref.svrId)
+                    .put("quoteType", ref.type)
+                    .put("quoteFromUsr", ref.fromUsr)
+                    .put("quoteChatUsr", ref.chatUsr)
+                    .put("dryRun", r.dryRun)
+                    .put("submitted", r.submitted)
+                    .put("verified", hit != null)
+                    .put("msgId", hit?.get("msgId") ?: "")
+                    .put("msgType", hit?.get("type") ?: "")
+                    .put("costMs", r.costMs)
+                    .put("message", if (hit != null) r.message + "；已入库 msgId=" + hit["msgId"] + " type=" + hit["type"] else r.message)
+                if (r.ok) Jsons.ok(data) else Jsons.err(r.message, "SEND_FAILED").put("data", data)
+            }
+        }
+    )
+
+// ---------------------------------------------------------------- 引用辅助
+
+/** 按 msgId 或 msgSvrId 取一条消息（只允许数字，避免拼接注入）。 */
+private fun lookupMessage(id: String): Map<String, String>? {
+    val safe = id.trim()
+    if (safe.isEmpty() || !safe.all { it.isDigit() }) return null
+    return runCatching {
+        DbGateway.query(
+            "SELECT msgId,msgSvrId,talker,type,content,createTime,isSend FROM message" +
+                " WHERE msgId=$safe OR msgSvrId=$safe ORDER BY createTime DESC LIMIT 1",
+            null,
+            1
+        )
+    }.getOrNull()?.firstOrNull()
+}
+
+/** 当前登录账号 wxid（userinfo 首行）；拿不到就空串。 */
+private fun selfWxid(): String = runCatching {
+    DbGateway.query("SELECT username FROM userinfo LIMIT 1", null, 1)
+        .firstOrNull()?.get("username") ?: ""
+}.getOrDefault("")
+
+/** 解析发送者：群聊原文以 "wxid:\n" 开头，私聊即会话 id。 */
+private fun senderOf(row: Map<String, String>): String {
+    val talker = row["talker"] ?: ""
+    if (!talker.endsWith("@chatroom")) return talker
+    val content = row["content"] ?: ""
+    val idx = content.indexOf(":\n")
+    return if (idx in 1..64) content.substring(0, idx) else ""
+}
 }
 
 /** at_wxids 支持 JSON 数组 / 逗号分隔字符串 / 缺省。 */
