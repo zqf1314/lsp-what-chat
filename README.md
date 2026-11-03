@@ -30,7 +30,7 @@
 |---|---|---|
 | M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
-| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 文本实测成功（0.2.10）`filehelper` msgId=12478；图片实测成功（0.2.14）msgId=12735/12736 `type=3` 带完整 `<img aeskey/md5>`；文件实测成功（0.2.23）msgId=12741 `type=0x41000031`（appmsg），走 SDK 链路 `WXFileObject→WXMediaMessage→k0.F`；引用实测成功（0.2.24）msgId=12742 `type=49`、content 是 `appmsg type=57 + refermsg`，走微信自己的 builder `q61.t1.a(talker)→g/e/h→b()` |
+| M2 | 发送（文本/图片/文件/引用/名片）+ dry_run + 限流 | 全部实测通过（`filehelper`）：文本 `msgId=12478`；图片 `12735` `type=3`；文件 `12741` `type=0x41000031`（`WXFileObject→WXMediaMessage→k0.F`）；引用 `12742` `type=49`（`refermsg` appmsg，`q61.t1` builder）；名片 `12744` `type=42`，引用名片回归 `12745` `type=49` |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
 
 ## 工具
