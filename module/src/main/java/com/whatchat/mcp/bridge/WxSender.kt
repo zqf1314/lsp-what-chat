@@ -173,10 +173,11 @@ object WxSender {
         map["atuserlist"] = "<![CDATA[" + atWxIds.joinToString(",") + "]]>"
 
         // 8.0.80 实测只有这两个 6 参构造：
-        //   (String,String,int,int,long,String)   —— 不带附加信息
-        //   (String,String,int,int,Object,String) —— 第 5 参接 HashMap（@ 列表就走这条）
-        // 参考实现传的是 HashMap，所以优先 Object 变体。
-        val candidates = ArrayList<Pair<Constructor<*>, Array<Any?>>>()
+        //   (String,String,int,int,long,String)   —— 不带附加信息（纯文本实测可发）
+        //   (String,String,int,int,Object,String) —— 第 5 参接 HashMap（@ 列表走这条）
+        // 带 @ 时优先 Object 变体（参考实现就是这么传的），纯文本则先用 long 变体（已验证）。
+        val withMap = ArrayList<Pair<Constructor<*>, Array<Any?>>>()
+        val withLong = ArrayList<Pair<Constructor<*>, Array<Any?>>>()
         cls.declaredConstructors.forEach { c ->
             val p = c.parameterTypes
             if (p.size != 6 || p[0] != String::class.java || p[1] != String::class.java ||
@@ -186,11 +187,13 @@ object WxSender {
             }
             when {
                 p[4] == Any::class.java || p[4] == Object::class.java || Map::class.java.isAssignableFrom(p[4]) ->
-                    candidates.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, map, ""))
+                    withMap.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, map, ""))
                 p[4] == java.lang.Long::class.java || p[4] == Long::class.javaPrimitiveType ->
-                    candidates.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, 0L, ""))
+                    withLong.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, 0L, ""))
             }
         }
+        val candidates: List<Pair<Constructor<*>, Array<Any?>>> =
+            if (atWxIds.isEmpty()) withLong + withMap else withMap + withLong
 
         if (candidates.isEmpty()) {
             throw IllegalStateException("没找到可用的 6 参构造器，实际：" + ctorSummary(cls))
