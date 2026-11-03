@@ -103,8 +103,47 @@ git checkout v0.2.30-m3-baseline
 
 | 版本 | 变更 | 实测 |
 |---|---|---|
-| 0.2.31 | 新增 UI 工具（进程内 startActivity，不需要 root） | `profile` 到位 |
-| 0.2.32 | 移除 `add`/`room`（直连会把微信带崩） | `profile` 稳定 |
-| 0.2.33 | 收敛为单一工具 `wx_open_profile`：只开资料页，删除 `mode`/`sayhi`/`force_get_contact`/`verify` | `topActivity=ContactInfoUI`、`arrived=true` |
+| 0.2.31 | 新增 UI 工具（进程内 `startActivity`，不需要 root） | `profile` 到位 |
+| 0.2.32 | 移除 `add` / `room`（直连 `FTSAddFriendUI` / `ChatroomInfoUI` 会把微信带崩） | `profile` 稳定 |
+| 0.2.33 | 收敛为单一工具 `wx_open_profile`：只开资料页，删除 `mode` / `sayhi` / `force_get_contact` / `verify` | 见 9.1 |
 
 > 工具数 20；新增工具不改变第 5 节任何不变量。
+
+### 9.1 0.2.33（当前交付版）
+
+| 项 | 值 |
+|---|---|
+| commit | `637caf7`（代码）+ `9782674`（踩坑表）+ 本次文档提交 |
+| 安装包 | `releases/whatchat-mcp-0.2.33-vc35-release.apk`（本地归档，`*.apk` 不入库） |
+| sha256 | `46978a65ea47e856ccf979d6fa92e9160c3d0bda4a2dfe91256f0d25c23e6e2f` |
+| 大小 | 701,373 字节 |
+| 安装 | 同签名 `pm install -r` 覆盖，`versionName=0.2.33` / `versionCode=35`；不卸载（保住 LSPosed 启用状态） |
+
+工具契约——只有一个 UI 工具，没有 `mode` 分支：
+
+| 入参 | 必填 | 说明 |
+|---|---|---|
+| `wxid` | ✅ | 目标联系人 `wxid`（`wxid_*`） |
+| `room` | | 群聊 `@chatroom` id；带上则同时透传 `Contact_ChatRoomId` |
+| `nickname` | | 展示用昵称，透传 `Contact_Nick` / `Contact_RoomNickname` |
+| `dry_run` | | 只回组件与 extras，不真启动 |
+
+返回：`started`（请求是否发出）、`topActivity`（微信栈内 `paused=false` 的 Activity 类名，反射 `ActivityThread.mActivities` 读出）、`arrived`（是否等于目标页）。
+错误码：`BAD_ARGUMENT` / `BAD_ROOM` / `NO_CONTEXT` / `CLASS_NOT_FOUND` / `START_FAILED`。
+
+实测记录（真机，单次调用，不做批量试）：
+
+```
+wx_open_profile {"wxid":"wxid_xkucywpdr3k322"}
+→ ok=true, started=true,
+  topActivity=com.tencent.mm.plugin.profile.ui.ContactInfoUI,
+  arrived=true
+→ 调用后 pidof com.tencent.mm 非空、/health 返回 200（未复现崩溃）
+```
+
+边界与已知限制：
+
+- 只把资料页拉到微信任务栈顶，**不发好友申请、不点任何按钮**；「添加到通讯录」由用户自己点。
+- 微信不在前台时，Android 后台启动限制可能让页面起来但不可见（此时系统 `topResumedActivity` 是别的 app）；先把微信切前台再调。
+- `arrived=true` 只证明目标页在微信栈内，**不等于内容渲染完整**——`sayhi` 就是这样翻车的（`arrived=true` 但页面空白）。
+- `SayHiWithSnsPermissionUI` / `FTSAddFriendUI` / `ChatroomInfoUI` 实测空白或直接把进程带崩，**不提供参数入口**；将来要用必须单独验证通过后再加。

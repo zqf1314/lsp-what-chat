@@ -32,6 +32,7 @@
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
 | M2 | 发送（文本/图片/文件/引用/名片）+ dry_run + 限流 | 全部实测通过（`filehelper`）：文本 `msgId=12478`；图片 `12735` `type=3`；文件 `12741` `type=0x41000031`（`WXFileObject→WXMediaMessage→k0.F`）；引用 `12742` `type=49`（`refermsg` appmsg，`q61.t1` builder）；名片 `12744` `type=42`，引用名片回归 `12745` `type=49` |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | **已定基准 0.2.30**（见 `BASELINE.md`）。`wx_activity` 7 天 `total=3601`、`byDay` 逐日 `2026-10-28…11-04`、`topTalkers` 带 `isChatroom`；`wx_hot_words` 降噪后（原 `com/捂脸/https` 已剔除，榜首 `后台 9`，`distinct=3786`）；`wx_context` 每条带 `time`，`before/after` 走 `(createTime,msgId)` 复合比较；`wx_export_csv` 取最近 N 条升序、表头含 `time` 列，私有 + 外部双路径 |
+| M3.5 | UI 定向（按 `wxid` 打开对方资料页） | **0.2.33 实测通过**：`wx_open_profile` → `topActivity=com.tencent.mm.plugin.profile.ui.ContactInfoUI`、`arrived=true`，调用后微信进程与 `/health` 均正常。`sayhi` / `add` / `room` 三种未验证跳转已删除（见踩坑表） |
 
 ## 工具
 
@@ -55,7 +56,7 @@
 | `wx_hot_words` | 聊天热词：中文 2~4 字滑窗 + 英文整词 + 停用词表 | ✅ |
 | `wx_context` | 上下文打包：按 `around` msgId（或最新一条）取前 N/后 M 条，群聊自动剥 `wxid:\n` 前缀 | ✅ |
 | `wx_export_csv` | 导出最近 N 天消息为 CSV（取最近 `limit` 条后升序落盘，私有 + `Android/data` 外部目录各一份） | ❌ |
-| `wx_open_profile` | 按 `wxid` 打开对方资料页（进程内 `startActivity`，不需要 root；只跳界面，不发申请） | ❌ |
+| `wx_open_profile` | 按 `wxid` 打开对方资料页（`ContactInfoUI`，`Contact_Scene=9`）：进程内 `startActivity`，不需要 root；只跳界面，不发申请、不改数据。入参 `wxid`（必填）/ `room` / `nickname` / `dry_run`，回填 `topActivity` / `arrived` | ❌ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
 ## 让微信不被冻结（重要，否则 MCP 会“连上不回”）
@@ -222,4 +223,5 @@ gradle :module:assembleRelease
 
 - 仅用于个人账号自用。发送消息是真实操作，模型判断错误会发错内容，务必先开 `dry_run`。
 - 微信版本升级会导致内部坐标失效，模块需跟着适配。
+- `wx_open_profile` 只把资料页拉到微信栈顶，不发好友申请、不点任何按钮；`arrived=true` 仅表示目标页在微信任务栈内，不代表内容渲染完整。
 - 不做任何绕过风控、批量骚扰的用途。

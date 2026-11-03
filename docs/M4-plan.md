@@ -4,7 +4,7 @@
 
 ## 0. 现状与约束
 
-- 现有 19 个工具：状态/只读检索（8）、M2 发送五件套（5）、M3 分析（4）、`wx_send_limits` / `wx_probe_send` / `wx_raw_sql`。
+- 现有 20 个工具：状态/只读检索（8）、M2 发送五件套（5）、M3 分析（4）、`wx_open_profile`（UI 定向，0.2.33）、`wx_send_limits` / `wx_probe_send` / `wx_raw_sql`。
 - 传输：模块在微信进程内起 HTTP 服务 `127.0.0.1:18765`，JSON-RPC over HTTP，**请求-响应**模型（单连接内并发、按序回写）。
 - 关键约束：**HTTP 拉模式没有服务端主动推送通道**（除非加 SSE）。所以"AI 感知新消息"必须靠**客户端轮询**或**长轮询**实现，不能照搬 stdio/SSE 的 `notifications`。
 - 所有写操作沿用既有纪律：默认 `dry_run=true`、发后回查消息库校验落库类型、失败返回结构化错误码。
