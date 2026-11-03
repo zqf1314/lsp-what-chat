@@ -48,6 +48,30 @@
 | `wx_send_limits` | 发送约束与当前限流用量 | ✅ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
+## 让微信不被冻结（重要，否则 MCP 会“连上不回”）
+
+模块跑在微信进程里。微信一旦退到后台被判为 cached，Android 会把**整个进程**冻住（freezer）：
+端口还在 LISTEN，但 `accept` 线程拿不到 CPU，客户端连上后一个字节都收不到 —— 表现就是请求挂死。
+
+现场判断：
+
+```bash
+cat /proc/<微信pid>/task/<accept tid>/wchan      # do_freezer_trap = 被冻了
+cat /sys/fs/cgroup/apps/uid_10402/cgroup.freeze  # 1 = 冻结
+```
+
+三种解法（从省事到彻底）：
+
+1. 调 MCP 前把微信拉回前台或分屏；
+2. HyperOS：微信 → 省电策略 → 无限制，最近任务卡片上锁；
+3. 有 root（KernelSU/Magisk）：用 `tools/wx-keepalive.sh`
+
+```bash
+sh tools/wx-keepalive.sh once        # 解冻一次
+sh tools/wx-keepalive.sh watch 5     # 常驻巡检，被冻就解冻
+# 开机自启：cp 到 /data/adb/service.d/ 并 chmod 755，末尾加一行 ( sh "$0" watch 5 & )
+```
+
 ## 构建
 
 推到 `main` 后由 GitHub Actions 自动构建，产物在 Actions → Artifacts → `whatchat-mcp-apk`。
