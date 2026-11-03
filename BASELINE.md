@@ -103,7 +103,8 @@ git checkout v0.2.30-m3-baseline
 
 | 版本 | 变更 | 实测 |
 |---|---|---|
-| 0.2.31 | 新增 `wx_open_add_friend`（进程内 startActivity 拉起微信 Activity，不需要 root） | `profile` 到位；`add`/`room` 直连会把微信进程带崩 |
-| 0.2.32 | 收敛：只保留 `profile`（ContactInfoUI）/ `sayhi`（SayHiWithSnsPermissionUI），`add`/`room` 返回 `BAD_MODE` | `profile→arrived=true`、`sayhi→arrived=true`、`add/room→BAD_MODE`，之后 `health` 仍 200 |
+| 0.2.31 | 新增 UI 工具（进程内 startActivity，不需要 root） | `profile` 到位 |
+| 0.2.32 | 移除 `add`/`room`（直连会把微信带崩） | `profile` 稳定 |
+| 0.2.33 | 收敛为单一工具 `wx_open_profile`：只开资料页，删除 `mode`/`sayhi`/`force_get_contact`/`verify` | `topActivity=ContactInfoUI`、`arrived=true` |
 
-> 基准工具数由 19 增至 20；新增工具不改变第 5 节任何不变量。
+> 工具数 20；新增工具不改变第 5 节任何不变量。

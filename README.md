@@ -55,7 +55,7 @@
 | `wx_hot_words` | 聊天热词：中文 2~4 字滑窗 + 英文整词 + 停用词表 | ✅ |
 | `wx_context` | 上下文打包：按 `around` msgId（或最新一条）取前 N/后 M 条，群聊自动剥 `wxid:\n` 前缀 | ✅ |
 | `wx_export_csv` | 导出最近 N 天消息为 CSV（取最近 `limit` 条后升序落盘，私有 + `Android/data` 外部目录各一份） | ❌ |
-| `wx_open_add_friend` | 按 `wxid` 拉起对方资料页 / 打招呼页（进程内 `startActivity`，不需要 root；只跳界面，不发申请） | ❌ |
+| `wx_open_profile` | 按 `wxid` 打开对方资料页（进程内 `startActivity`，不需要 root；只跳界面，不发申请） | ❌ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
 ## 让微信不被冻结（重要，否则 MCP 会“连上不回”）
