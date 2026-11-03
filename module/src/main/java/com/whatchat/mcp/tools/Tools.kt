@@ -23,6 +23,7 @@ object Tools {
         registerSendTools()
         registerSendFileQuoteTools()
         registerAnalysisTools()
+        registerUiTools()
         registerRawSqlTool()
     }
 

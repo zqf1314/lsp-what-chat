@@ -257,6 +257,6 @@ class McpDispatcher {
     companion object {
         const val PROTO_MODERN = "2026-07-28"
         const val PROTO_LEGACY = "2025-11-25"
-        const val SERVER_VERSION = "0.2.30"
+        const val SERVER_VERSION = "0.2.31"
     }
 }
