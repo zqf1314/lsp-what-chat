@@ -31,7 +31,7 @@
 | M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
 | M2 | 发送（文本/图片/文件/引用/名片）+ dry_run + 限流 | 全部实测通过（`filehelper`）：文本 `msgId=12478`；图片 `12735` `type=3`；文件 `12741` `type=0x41000031`（`WXFileObject→WXMediaMessage→k0.F`）；引用 `12742` `type=49`（`refermsg` appmsg，`q61.t1` builder）；名片 `12744` `type=42`，引用名片回归 `12745` `type=49` |
-| M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
+| M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 全部实测通过（0.2.29）：`wx_activity` 7 天 `total=3601`、`byDay` 逐日 `2026-10-28…11-04`、`topTalkers` 首位 `1985` 条；`wx_hot_words`（群 3 天采样 300 → `捂脸/https/后台`）；`wx_context`（`filehelper` anchor `12745` 带出 `12742/12743/12744`）；`wx_export_csv` `rows=48 bytes=23698`，私有 + 外部双路径 |
 
 ## 工具
 
@@ -51,6 +51,10 @@
 | `wx_send_card` | 发送联系人名片（`type=42`，昵称缺省从 `rcontact` 补） | ❌ |
 | `wx_send_limits` | 发送约束与当前限流用量 | ✅ |
 | `wx_probe_send` | 反射勘察发送核方法表（诊断用） | ✅ |
+| `wx_activity` | 活跃度统计：最近 N 天总量/收发分列、逐日分桶、Top 会话（`createTime` 毫秒对齐） | ✅ |
+| `wx_hot_words` | 聊天热词：中文 2~4 字滑窗 + 英文整词 + 停用词表 | ✅ |
+| `wx_context` | 上下文打包：按 `around` msgId（或最新一条）取前 N/后 M 条，群聊自动剥 `wxid:\n` 前缀 | ✅ |
+| `wx_export_csv` | 导出最近 N 天消息为 CSV（取最近 `limit` 条后升序落盘，私有 + `Android/data` 外部目录各一份） | ❌ |
 | `wx_raw_sql` | 只读 SQL 直通（白名单表，默认不启用） | ✅ |
 
 ## 让微信不被冻结（重要，否则 MCP 会“连上不回”）
@@ -148,6 +152,7 @@ gradle :module:assembleRelease
 | 发消息“dry_run 也真发出去了” | 微信 8.0.80 的 `q61.s0` **构造器本身就把消息入队**（构造后不调任何方法，DB 里也有 `isSend=1` 的记录） | dry-run 改成纯反射能力探测（不 new 实例）；限流检查挪到构造之前；构造后再补 `doScene` 也不产生重复消息 |
 | **发图片返回 submitted 却查不到消息** | `wx_send_image` 命中发送核心、`submitted=true`、`costMs` 十几毫秒，但 `message` 表没有新行；`DupCheck-1.db` 有打开痕迹 | 不是坐标问题，是**分区存储**：`/sdcard` 走 FUSE，别的 app 或 `adb shell` 建的文件（即便 `chmod 644`、即便拷进 `com.tencent.mm` 目录）微信进程都读不到，发送核心**静默失败不报错**。换成微信自己目录下的图（`.../cache/*/openapi_cache/*.png`）立刻成功：`msgId=12735 type=3` 带 `<img aeskey/md5/length>`。0.2.14 起 `WxSender` 先做 `File.canRead()` 预检，`SendTools` 发后 2.5s 轮询 `message` 表返回 `verified/msgId/msgType` |
 | `su <uid> sh -c` 验证不了权限 | 以微信 uid 执行 `head` 仍报 `Permission denied`，容易误判 | `su` 起的进程不在微信的 mount namespace 里，FUSE 判定不适用。要判断「微信能不能读」只有两条路：在微信进程内 `File.canRead()`（模块已内置），或直接看发送后有没有入库 |
+| **`message.createTime` 是毫秒**（如 `1791352171000`） | `wx_activity` 的 `byDay` 全是 `"day": ""` 且只有 1 行；`total=12283` 看着像对的，其实 `createTime >= since(按秒算)` 恒真 → 统计的是**全库**，`days` 参数完全失效；`strftime('%Y-%m-%d', createTime, 'unixepoch')` 因数值超范围直接返回 NULL | 时间一律按毫秒：`sinceMs = System.currentTimeMillis() - days*86400_000L`；分天用 `strftime('%Y-%m-%d', createTime/1000 + 28800, 'unixepoch')`（先除 1000 再补 8h）。微信内置 sqlite 3.27.2 对 `strftime` 修饰符链敏感，别在 `'unixepoch'` 后再叠 `'localtime'`，叠了就整体 NULL。修后 7 天 `total=3601`、`byDay` 逐日正常 |
 
 ## 与参考实现的关系
 
