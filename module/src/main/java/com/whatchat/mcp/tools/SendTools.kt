@@ -217,4 +217,3 @@ private fun waitNewMessage(talker: String, afterMsgId: Long, budgetMs: Long): Ma
     }
     return null
 }
-}
