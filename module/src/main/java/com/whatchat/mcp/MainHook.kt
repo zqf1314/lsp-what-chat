@@ -43,6 +43,11 @@ class MainHook : IXposedHookZygoteInit, IXposedHookLoadPackage {
         val cl = lpparam.classLoader
         var armed = 0
 
+        // 关键时机：微信在自己 Application.attachBaseContext 里就会打开 EnMicroMsg.db，
+        // 必须在这之前装好 SQLite hook，所以放在 handleLoadPackage 而不是 Bootstrap。
+        runCatching { com.whatchat.mcp.bridge.SqliteHook.install(cl) }
+            .onFailure { WxLog.e("early sqlite hook failed", it) }
+
         armed += hookAttachBase(Application::class.java, "Application", cl)
         if (armed == 0) {
             WxLog.w("Application.attachBaseContext not hookable, fallback to ContextWrapper")

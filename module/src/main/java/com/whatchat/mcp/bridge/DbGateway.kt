@@ -38,6 +38,12 @@ object DbGateway {
             append(lastProbeNote)
             append(" hookDbs=")
             append(SqliteHook.paths().size)
+            val paths = SqliteHook.paths()
+            if (paths.isNotEmpty()) {
+                append("[")
+                append(paths.take(4).joinToString(",") { it.substringAfterLast('/') })
+                append("]")
+            }
             append(" attached=")
             append(handlePath ?: "none")
             if (fieldCandidates.isNotEmpty()) {
@@ -53,12 +59,11 @@ object DbGateway {
         handle = null
         handlePath = null
 
-        // 首选主库，其次索引库，最后任意一个（至少能让 wx_status 展示状态）
+        // 只认微信主库与索引库：Scheduler.db / androidx.work.workdb 这类库虽然也开了，
+        // 但里面没有 message / rconversation 表，拿它当「已就绪」会误导所有工具。
         for (suffix in listOf(MAIN_DB, ALT_DB)) {
             SqliteHook.find(suffix)?.let { return cache(it, suffix) }
         }
-        SqliteHook.findAny()?.let { (path, instance) -> return cache(instance, path) }
-
         return scanFieldsForHandle()
     }
 
