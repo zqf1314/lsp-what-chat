@@ -1,5 +1,6 @@
 package com.whatchat.mcp.tools
 
+import com.whatchat.mcp.bridge.DbGateway
 import com.whatchat.mcp.bridge.WxSender
 import com.whatchat.mcp.server.Jsons
 import com.whatchat.mcp.server.Schema
@@ -104,15 +105,29 @@ fun registerSendTools() {
                 if (path.isBlank()) return@safe Jsons.err("path 不能为空", "BAD_ARGUMENT")
                 val dryRun = if (args.has("dry_run")) args.optBoolean("dry_run", true) else true
 
+                val beforeMsgId = if (dryRun) 0L else latestMsgId(talker)
                 val r = WxSender.sendImage(talker, path, dryRun)
+                // 真发时做「入库校验」：微信发送核心是异步的，submitted 只代表已派发。
+                // 只有消息库里出现新的 isSend=1 行，才算真的发出去了（/sdcard 权限不足时
+                // 核心会静默失败，这里能立刻暴露）。
+                val hit = if (r.ok && !r.dryRun) waitNewMessage(talker, beforeMsgId, 2500L) else null
+                val message = when {
+                    hit != null -> r.message + "；已入库 msgId=${hit["msgId"]} type=${hit["type"]}"
+                    r.ok && !r.dryRun -> r.message + "；2.5s 内消息库未出现新记录，" +
+                        "常见原因是文件本进程读不到或会话被折叠，请核对 path"
+                    else -> r.message
+                }
                 val data = JSONObject()
                     .put("talker", r.talker)
                     .put("path", r.path)
                     .put("sizeBytes", r.sizeBytes)
                     .put("dryRun", r.dryRun)
                     .put("submitted", r.submitted)
+                    .put("verified", hit != null)
+                    .put("msgId", hit?.get("msgId") ?: "")
+                    .put("msgType", hit?.get("type") ?: "")
                     .put("costMs", r.costMs)
-                    .put("message", r.message)
+                    .put("message", message)
 
                 if (r.ok) Jsons.ok(data) else Jsons.err(r.message, "SEND_FAILED").put("data", data)
             }
@@ -165,4 +180,41 @@ private fun parseAtList(args: JSONObject): List<String> {
         return out.distinct()
     }
     return emptyList()
+}
+
+// ---------------------------------------------------------------- 发送结果校验
+
+/** SQL 字符串字面量转义，避免 talker 里的单引号破坏语句。 */
+private fun sqlStr(value: String): String = "'" + value.replace("'", "''") + "'"
+
+/** 会话当前最大 msgId；读不到（库未就绪等）时返回 0，校验会退化为「不判断」。 */
+private fun latestMsgId(talker: String): Long = runCatching {
+    DbGateway.query(
+        "SELECT IFNULL(MAX(msgId),0) AS m FROM message WHERE talker=${sqlStr(talker)}",
+        null,
+        1
+    ).firstOrNull()?.get("m")?.toLongOrNull() ?: 0L
+}.getOrDefault(0L)
+
+/**
+ * 等一条新消息落库。微信发送是异步的：核心调用返回只代表「已派发」，
+ * 真正入库要等发送流水线跑完。这里按 250ms 轮询，返回新行（msgId/type/isSend）。
+ */
+private fun waitNewMessage(talker: String, afterMsgId: Long, budgetMs: Long): Map<String, String>? {
+    val deadline = System.currentTimeMillis() + budgetMs
+    while (System.currentTimeMillis() < deadline) {
+        val row = runCatching {
+            DbGateway.query(
+                "SELECT msgId,type,isSend FROM message" +
+                    " WHERE talker=${sqlStr(talker)} AND msgId>${afterMsgId}" +
+                    " ORDER BY msgId DESC LIMIT 1",
+                null,
+                1
+            )
+        }.getOrNull()?.firstOrNull()
+        if (row != null) return row
+        runCatching { Thread.sleep(250) }
+    }
+    return null
+}
 }

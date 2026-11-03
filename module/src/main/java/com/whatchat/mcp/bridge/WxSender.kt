@@ -195,6 +195,19 @@ object WxSender {
         val file = java.io.File(path)
         if (!file.exists()) return mediaFail(started, dryRun, target, path, 0L, "文件不存在：$path")
         if (!file.isFile) return mediaFail(started, dryRun, target, path, 0L, "不是普通文件：$path")
+        // 关键前置：必须是「微信本进程」能读到的文件。
+        // /sdcard 走 FUSE + 分区存储，别的 app / adb shell 创建的文件即便 chmod 644、
+        // 即便放进 com.tencent.mm 目录，微信进程也读不到；此时发送核心不报错、不入库，
+        // 表现为 submitted=true 而消息库没有新记录。这里提前拦下并给出可操作提示。
+        if (!file.canRead()) {
+            return mediaFail(
+                started, dryRun, target, path, 0L,
+                "当前进程无法读取该文件（Android 分区存储限制）：$path。" +
+                    "请改用微信自己可读的路径（例如用微信保存/接收过的文件、" +
+                    "/sdcard/Android/data/com.tencent.mm/MicroMsg/ 下由微信创建的文件），" +
+                    "或让本模块自己落盘后再发；chmod / chown 对本进程无效。"
+            )
+        }
         val size = runCatching { file.length() }.getOrDefault(0L)
 
         if (dryRun) {
