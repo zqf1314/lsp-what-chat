@@ -18,7 +18,10 @@
 PKG=com.tencent.mm
 
 uid_of() {
-    dumpsys package "$PKG" 2>/dev/null | grep -m1 -o 'userId=[0-9]*' | cut -d= -f2
+    # 有的 ROM 打的是 userId=，有的是 appId=（HyperOS 实测是 appId=）
+    dumpsys package "$PKG" 2>/dev/null |
+        grep -m1 -o -E '(userId|appId)=[0-9]+' |
+        cut -d= -f2
 }
 
 unfreeze() {
