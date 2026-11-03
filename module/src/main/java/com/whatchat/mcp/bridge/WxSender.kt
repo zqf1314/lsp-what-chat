@@ -359,6 +359,9 @@ object WxSender {
     private const val QUOTE_MSG_TYPE = 49
     private const val QUOTE_APPMSG_TYPE = 57
 
+    /** 微信自己的发消息 builder 工厂：q61.t1.a(talker) → s1，再 g/e/h 设参、b() 发送。 */
+    private const val BUILDER_FACTORY = "q61.t1"
+
     private const val UNREADABLE_HINT = "当前进程无法读取该文件（Android 分区存储限制）："
 
     /** 被引用的那条消息（字段语义对齐微信 refermsg）。 */
@@ -507,7 +510,7 @@ object WxSender {
         runCatching { c.getDeclaredConstructor().also { it.isAccessible = true }.newInstance() }.getOrNull()
             ?: runCatching { c.getField("INSTANCE").also { it.isAccessible = true }.get(null) }.getOrNull()
 
-    /** 发引用回复：自拼 refermsg appmsg，再按 type=49 走同一条发送链。 */
+    /** 发引用回复：自拼 refermsg appmsg，再走微信自己的发消息 builder（q61.t1.a → g/e/h → b）。 */
     fun sendQuote(
         talker: String,
         text: String,
@@ -515,11 +518,81 @@ object WxSender {
         atWxIds: List<String> = emptyList(),
         dryRun: Boolean = true,
     ): SendResult {
-        val xml = buildQuoteXml(text.trim(), ref, atWxIds)
-        val r = sendText(talker, xml, atWxIds, dryRun, QUOTE_MSG_TYPE, QUOTE_MSG_CLASS)
-        return if (!r.ok || r.dryRun) r else r.copy(
-            message = "已提交引用回复（svrid=${ref.svrId}，appmsg ${r.textLength} 字符）"
+        val started = System.currentTimeMillis()
+        val target = talker.trim()
+        val body = text.trim()
+        val xml = buildQuoteXml(body, ref, atWxIds)
+
+        fun fail(msg: String): SendResult = SendResult(
+            false, dryRun, false, target, body.length, atWxIds.size,
+            System.currentTimeMillis() - started, msg
         )
+
+        if (target.isEmpty()) return fail("talker 不能为空")
+        if (body.isEmpty()) return fail("text 不能为空")
+        if (dryRun) {
+            val probe = runCatching { probeBuilder() }.getOrElse { "probe 失败：${it.message}" }
+            return SendResult(
+                true, true, false, target, body.length, atWxIds.size,
+                System.currentTimeMillis() - started, "dry_run：未发送。$probe"
+            )
+        }
+        checkThrottle()?.let { return fail(it) }
+
+        val err = runCatching {
+            WxEnv.callOnMain(20_000L) { sendQuoteNow(target, xml, QUOTE_MSG_TYPE) }
+        }.getOrElse { "主线程执行失败：${it.javaClass.simpleName}: ${it.message}" }
+        val cost = System.currentTimeMillis() - started
+        if (err != null) {
+            WxLog.e("sendQuote: $err")
+            return fail(err)
+        }
+        WxLog.i("sendQuote: sent talker=$target svrid=${ref.svrId} xml=${xml.length} cost=${cost}ms")
+        return SendResult(
+            true, false, true, target, body.length, atWxIds.size, cost,
+            "已提交引用回复（svrid=${ref.svrId}，appmsg ${xml.length} 字符）"
+        )
+    }
+
+    private fun probeBuilder(): String = runCatching {
+        val cl = WxEnv.classLoader ?: return@runCatching "classLoader 未就绪"
+        val f = Class.forName(BUILDER_FACTORY, true, cl)
+        val m = f.declaredMethods.firstOrNull {
+            it.name == "a" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java
+        }
+        if (m == null) "builder 工厂不可用" else "builder 工厂 ok（$BUILDER_FACTORY.a(String)）"
+    }.getOrElse { "probe 异常：${it.message}" }
+
+    /** 照 WeChat 自己 ChattingBrandServiceHelper 的写法发送 appmsg。 */
+    private fun sendQuoteNow(talker: String, xml: String, msgType: Int): String? {
+        val cl = WxEnv.classLoader ?: return "classLoader 未就绪"
+        val factory = runCatching { Class.forName(BUILDER_FACTORY, true, cl) }.getOrNull()
+            ?: return "找不到 $BUILDER_FACTORY"
+        val create = factory.declaredMethods.firstOrNull {
+            it.name == "a" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java &&
+                Modifier.isStatic(it.modifiers)
+        } ?: return "$BUILDER_FACTORY 上没有 static a(String)"
+        create.isAccessible = true
+
+        val builder = runCatching { create.invoke(null, talker) }.getOrElse {
+            return "创建发送 builder 失败：${it.javaClass.simpleName}: ${it.message}"
+        } ?: return "创建发送 builder 返回 null"
+
+        val bc = builder.javaClass
+        val setTalker = bc.methods.firstOrNull { it.name == "g" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }
+        val setContent = bc.methods.firstOrNull { it.name == "e" && it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }
+        val setType = bc.methods.firstOrNull { it.name == "h" && it.parameterCount == 1 && isInt(it.parameterTypes[0]) }
+        val send = bc.methods.firstOrNull { it.name == "b" && it.parameterCount == 0 }
+        if (setTalker == null || setContent == null || setType == null || send == null) {
+            return bc.name + " 缺少 g/e/h/b：" + bc.declaredMethods.take(10)
+                .joinToString(";") { m -> m.name + "/" + m.parameterCount }
+        }
+        listOf(setTalker, setContent, setType, send).forEach { it.isAccessible = true }
+        setTalker.invoke(builder, talker)
+        setContent.invoke(builder, xml)
+        setType.invoke(builder, msgType)
+        send.invoke(builder)
+        return null
     }
 
     private fun buildQuoteXml(text: String, ref: QuoteRef, atWxIds: List<String>): String {
@@ -536,6 +609,7 @@ object WxSender {
             append("<fromusr>").append(xmlEscape(ref.fromUsr)).append("</fromusr>")
             append("<chatusr>").append(xmlEscape(ref.chatUsr)).append("</chatusr>")
             append("<displayname>").append(xmlEscape(ref.displayName)).append("</displayname>")
+            append("<createtime>").append(if (ref.createTimeMs > 0) ref.createTimeMs / 1000 else System.currentTimeMillis() / 1000).append("</createtime>")
             append("<content>").append(xmlEscape(quoted)).append("</content>")
             append("<createtime>").append(ref.createTimeMs / 1000).append("</createtime>")
             append("</refermsg>")
