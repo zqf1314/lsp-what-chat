@@ -32,8 +32,7 @@ private fun registerActivity() {
                 props = listOf(
                     "talker" to Schema.str("可选：只统计该会话（好友 wxid / 群 xxx@chatroom）"),
                     "days" to Schema.int("统计最近多少天，默认 7"),
-                    "top" to Schema.int("Top 会话数量，默认 10"),
-                    "tz_offset" to Schema.int("时区偏移小时，默认 8（北京时间）")
+                    "top" to Schema.int("Top 会话数量，默认 10")
                 )
             ),
             readOnly = true,
@@ -45,9 +44,7 @@ private fun registerActivity() {
                 val talker = args.optString("talker", "").trim()
                 val days = args.optInt("days", 7).coerceIn(1, 365)
                 val top = args.optInt("top", 10).coerceIn(1, 50)
-                val tz = args.optInt("tz_offset", 8)
                 val since = System.currentTimeMillis() / 1000 - days * 86400L
-                val mod = (if (tz >= 0) "+" else "") + tz + " hours"
 
                 val where = StringBuilder("createTime>=?")
                 val whereArgs = ArrayList<String>(listOf(since.toString()))
@@ -56,8 +53,11 @@ private fun registerActivity() {
                     whereArgs.add(talker)
                 }
 
+                // 按天分桶统一用「时间戳 + 8h 偏移后按 UTC 格式化」的纯算术写法。
+                // 不写 'localtime'：微信内置 sqlite 对修饰符链比较挑，多挂一个修饰符
+                // 就会让整个 strftime 返回 NULL（曾表现为 day 全是空串）。
                 val byDay = DbGateway.query(
-                    "SELECT strftime('%Y-%m-%d', createTime, 'unixepoch', 'localtime', '$mod seconds') AS day," +
+                    "SELECT strftime('%Y-%m-%d', createTime + 28800, 'unixepoch') AS day," +
                         " COUNT(*) AS total," +
                         " IFNULL(SUM(CASE WHEN isSend=1 THEN 1 ELSE 0 END),0) AS sent," +
                         " IFNULL(SUM(CASE WHEN isSend=0 THEN 1 ELSE 0 END),0) AS recv" +
