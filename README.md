@@ -30,7 +30,7 @@
 |---|---|---|
 | M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
-| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 文本实测成功（0.2.10）`filehelper` msgId=12478；图片实测成功（0.2.14）msgId=12735/12736 `type=3` 带完整 `<img aeskey/md5>`，并在发送后回查消息库返回 `verified/msgId`；文件/引用待开工 |
+| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 文本实测成功（0.2.10）`filehelper` msgId=12478；图片实测成功（0.2.14）msgId=12735/12736 `type=3` 带完整 `<img aeskey/md5>`；文件实测成功（0.2.23）msgId=12741 `type=0x41000031`（appmsg），走 SDK 链路 `WXFileObject→WXMediaMessage→k0.F`；引用实测成功（0.2.24）msgId=12742 `type=49`、content 是 `appmsg type=57 + refermsg`，走微信自己的 builder `q61.t1.a(talker)→g/e/h→b()` |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
 
 ## 工具
@@ -193,6 +193,9 @@ gradle :module:assembleRelease
 | 纯文本发 `filehelper` | `msgId=12478/12481`，`isSend=1`，`msgSvrId` 非空（确实过服务器） |
 | 连续两条 | 第二条被限流拦下：`发送过快，请 1481ms 后再试` |
 | 带 `at_wxids` | 命中 `(String,String,int,int,Object,String)` 构造器（HashMap 那条），纯文本命中 `(String,String,int,int,long,String)` |
+| 发文件 `NoSuchMethodException` | `WXMediaMessage` 没有 `(WXFileObject)` 构造器、`WXFileObject` 也没有 `(String)` 构造器 | 改自适应反射：`declaredConstructors` 找单参可赋值构造器，否则无参 + 沿继承链找字段写 `mediaObject`/`title`（`WxSender.allFields/senderInstance`） |
+| 引用落库成 `type=1`（原始 XML 被当纯文本） | 手搓 appmsg XML 走 `q61.s0`/`q61.s1` 都发不出去：`s1` 没有 6 参构造器（只有 `()`），它是 builder | 照微信自己的 `ChattingBrandServiceHelper`：`q61.t1.a(talker)` → `g(talker)` → `e(xml)` → `h(49)` → `b()`（内部 `executeByPPC`），实测 `type=49` |
+| `buildOnMain` 丢了 `msgClass` | 引用明明切了 msgClass，实际仍走默认 `q61.s0` | `buildOnMain` 必须把 `msgClass` 透传进 `buildNetScene` |
 
 ### 参考实现的能力面（1.1.8，共 6 个 ToolSet）
 

@@ -352,9 +352,6 @@ object WxSender {
     private const val FILE_APP_ID = "wx4310bbd51be7d979"
     private const val FILE_APP_TYPE = "weixinfile"
 
-    /** 引用回复用 appmsg 的 netScene 类（q61.s0 是纯文本，q61.s1 才是 appmsg）。 */
-    private const val QUOTE_MSG_CLASS = "q61.s1"
-
     /** 引用回复走 appmsg：外层消息 type=49，内部 <appmsg><type>57</type><refermsg>… */
     private const val QUOTE_MSG_TYPE = 49
     private const val QUOTE_APPMSG_TYPE = 57
