@@ -111,6 +111,8 @@ gradle :module:assembleRelease
 | 主线程 `Socket.connect` | 抛 `NetworkOnMainThreadException`，探测恒为 false | 探测放后台线程，结果回 `runOnUiThread` |
 | 微信不用 AOSP 的 `SQLiteDatabase` | 扫 `android.database.sqlite.SQLiteDatabase` 字段一个都扫不到（`fields=0`），hook `com.tencent.wcdb.database.SQLiteDatabase` 的构造器/rawQuery 也挂不上（微信 8.0.80 不走那些入口） | 改成照抄 `com.wechat.wechatai` 1.1.8 的反射链：`w41.i9.b()` → `t()` → `f(sql,args,0)`（见下节坐标表） |
 | 覆盖安装后模块又“无作用” | 日志里没有 `MCP http listening`，`modules_state.enabled=0`（LSPosed 把模块判为未启用） | 到 LSPosed 管理器把 WhatChat MCP 勾上、作用域勾微信，再强制停止微信重开；本仓库不动 `modules_config.db` |
+| Eta 报“不支持并发” | 一条 keep-alive 连接上并行发多个 `tools/call`，旧实现读一个处理完再读下一个，慢调用把后面全堵住 | 0.2.7 起单连接内并发执行、按序回写（HTTP/1.1 只要求响应有序）；实测 8 并发在 7ms 内全部返回 |
+| 跑一阵后端口不再响应 | 客户端连上但数据堆在接收队列，`accept` 长期不返回；`kill -3` 抓到 `whatchat-http` 卡在 `PlainSocketImpl.socketAccept` | 0.2.8 给 `ServerSocket` 设 30s `soTimeout`（超时 continue）+ 连接改走线程池，避免线程随连接数堆积 |
 
 ## 与参考实现的关系
 
@@ -131,6 +133,28 @@ gradle :module:assembleRelease
 | 就绪判断 | `db` 非 null；`DbGateway.probeReport` 里的 `wxdb=` 段是解析诊断 |
 
 对应实现：`module/src/main/java/com/whatchat/mcp/bridge/WxDb.kt`（`WxEnv.callOnMain` 内解析与查询，避免微信 Core 的线程约束）；`DbGateway` 优先走它，`SqliteHook` 保留为兜底。
+
+### 发送消息坐标（微信 8.0.80，已逆出，待移植）
+
+参考实现的发消息是「自己造消息对象 → 交给微信网络核心发」，全程反射，不碰 UI：
+
+| 用途 | 常量/调用 |
+|---|---|
+| 文本消息对象 | `Class.forName("q61.s0")`，构造参数 `(talker, text, Integer(1), Integer(0x123), HashMap, "")` |
+| @ 人 | 上面那个 HashMap 放 `"atuserlist" -> "<![CDATA[wxid1,wxid2]]>"` |
+| 提交 | `l54->ʻˆ()` 取微信网络核心类名 → 静态 `l54->ʻʻ()` 拿实例 → 对实例调 `l54->ʻʿ()`（doScene 语义），传 `(netScene, callback)` |
+| 其它消息 | 图片/文件/引用/名片各有独立的 lambda（`sendWeChatImageMessage` / `sendWeChatFileMessage` / `sendWeChatQuoteMessage` / `sendWeChatContactCardMessage`），套路一致 |
+
+判空/长度校验参考实现也做了：`sendId` 与 `text` 不能为空、正文上限 4000 字（`0xfa0`），超限直接返回错误 JSON。
+
+### 参考实现的能力面（1.1.8，共 6 个 ToolSet）
+
+| ToolSet | 工具数 | 内容 | 本项目的取舍 |
+|---|---|---|---|
+| `WeChatDbToolSet` | ~43 | 会话/消息/联系人/群成员/统计/schema/CSV 导出/原始只读 SQL | 已覆盖核心 8 个，长尾按需补 |
+| `SendMessageToolSet` | 5 | 文本、图片、文件、引用、名片 | **M2 要抄的全部** |
+| `WechatToolSet` | 2 | 联系人备注名 读/写 | 写操作，放 M2 之后 |
+| `FileToolSet` / `ShellToolSet` / `AppTools` | 16 / 17 / 22 | 文件、root shell、设备信息/计算器 | 不纳入（Eta 自带这些能力） |
 
 ## 免责
 
