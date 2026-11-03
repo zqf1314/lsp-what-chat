@@ -94,9 +94,21 @@ gradle :module:assembleRelease
 | 现象 | 排查 |
 |---|---|
 | 端口连不上 | LSPosed 作用域是否含微信；微信是否被强制重启；`logcat -s WhatChatMCP` 是否有 `MCP http listening` |
+| 日志里 `NoSuchMethodError: Application#attachBaseContext` | Android 16 把该方法下沉到 `ContextWrapper`，v0.2.0 起已改成「按名 hook + Instrumentation 兜底」，升级即可 |
 | `wx_status` 里 `dbReady=false` | 看 `data.dbProbe` 的 `candidates`，M0 坐标还没对上，把候选贴到 issue |
 | 工具返回 `TOOL_ERROR` | 多半是表字段随微信版本变化，用 `wx_raw_sql` 手动确认字段名 |
 | 微信启动变慢 | 只探测一次、跑在后台线程；如仍明显，把 `DbGateway.probe()` 改为按需触发 |
+| 安装报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 之前用 CI 临时 debug key 签的包装不上了：先 `pm uninstall com.whatchat.mcp` 再装，之后固定签名可覆盖升级 |
+
+## 踩坑记录
+
+| 坑 | 表现 | 处理 |
+|---|---|---|
+| `Application#attachBaseContext` 在 Android 16 上找不到 | `NoSuchMethodError: android.app.Application#attachBaseContext[class android.content.Context]#exact`，hook 链直接断，服务永不启动 | 改用 `XposedBridge.hookAllMethods` 按方法名挂 + `ContextWrapper` 回退 + `Instrumentation.callApplicationOnCreate` 兜底 |
+| CI 每次生成新 debug keystore | 两次构建签名不同，覆盖安装报 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | 仓库不存 keystore；用 `SIGNING_KEYSTORE_B64` + `SIGNING_STORE_PASS` 两个 Actions secret，构建时解码成固定 keystore |
+| 卸载重装会丢 LSPosed 启用状态 | `modules_state` / `scope` 行被清空，模块回到未启用 | 固定签名后正常覆盖升级即可，别再卸载 |
+| UI 读不到微信进程状态 | 模块 Activity 在独立进程，`WxEnv` 永远 unknown | 改成 TCP 探测 `127.0.0.1:18765`，微信版本走 `PackageManager` 读 |
+| 主线程 `Socket.connect` | 抛 `NetworkOnMainThreadException`，探测恒为 false | 探测放后台线程，结果回 `runOnUiThread` |
 
 ## 与参考实现的关系
 
