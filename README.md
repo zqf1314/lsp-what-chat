@@ -30,7 +30,7 @@
 |---|---|---|
 | M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
-| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 文本已实测发送成功（0.2.10）：`filehelper` msgId=12478 `isSend=1`；图片/文件/引用待开工 |
+| M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 文本实测成功（0.2.10）`filehelper` msgId=12478；图片实测成功（0.2.14）msgId=12735/12736 `type=3` 带完整 `<img aeskey/md5>`，并在发送后回查消息库返回 `verified/msgId`；文件/引用待开工 |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
 
 ## 工具
@@ -141,6 +141,8 @@ gradle :module:assembleRelease
 | 跑一阵后端口不再响应 | 客户端连上但数据堆在接收队列，`accept` 长期不返回；`kill -3` 抓到 `whatchat-http` 卡在 `PlainSocketImpl.socketAccept` | 0.2.8 给 `ServerSocket` 设 30s `soTimeout`（超时 continue）+ 连接改走线程池，避免线程随连接数堆积 |
 | **端口连上但一个字节都不回**（更容易复现） | 微信进程被系统冻住：`/proc/<pid>/task/<accept tid>/wchan = do_freezer_trap`、`/sys/fs/cgroup/apps/uid_10402/cgroup.freeze = 1`、`ss` 里连接停在 accept 队列（`ESTAB` 无 owner、`Recv-Q` 有字节） | 这是 Android 的 cached-app freezer，不是服务端 bug。把微信拉回前台/分屏，或对微信关掉省电限制（HyperOS：省电策略→无限制 + 最近任务上锁），进程解冻后健康检查立刻恢复 200（实测 1.9ms） |
 | 发消息“dry_run 也真发出去了” | 微信 8.0.80 的 `q61.s0` **构造器本身就把消息入队**（构造后不调任何方法，DB 里也有 `isSend=1` 的记录） | dry-run 改成纯反射能力探测（不 new 实例）；限流检查挪到构造之前；构造后再补 `doScene` 也不产生重复消息 |
+| **发图片返回 submitted 却查不到消息** | `wx_send_image` 命中发送核心、`submitted=true`、`costMs` 十几毫秒，但 `message` 表没有新行；`DupCheck-1.db` 有打开痕迹 | 不是坐标问题，是**分区存储**：`/sdcard` 走 FUSE，别的 app 或 `adb shell` 建的文件（即便 `chmod 644`、即便拷进 `com.tencent.mm` 目录）微信进程都读不到，发送核心**静默失败不报错**。换成微信自己目录下的图（`.../cache/*/openapi_cache/*.png`）立刻成功：`msgId=12735 type=3` 带 `<img aeskey/md5/length>`。0.2.14 起 `WxSender` 先做 `File.canRead()` 预检，`SendTools` 发后 2.5s 轮询 `message` 表返回 `verified/msgId/msgType` |
+| `su <uid> sh -c` 验证不了权限 | 以微信 uid 执行 `head` 仍报 `Permission denied`，容易误判 | `su` 起的进程不在微信的 mount namespace 里，FUSE 判定不适用。要判断「微信能不能读」只有两条路：在微信进程内 `File.canRead()`（模块已内置），或直接看发送后有没有入库 |
 
 ## 与参考实现的关系
 
