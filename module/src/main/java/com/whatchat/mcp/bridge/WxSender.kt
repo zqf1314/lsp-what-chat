@@ -82,7 +82,31 @@ object WxSender {
 
         val atList = atWxIds.map { it.trim() }.filter { it.isNotEmpty() }
 
-        // ---------------------------------------------------------- 造对象（微信主线程）
+        // ---------------------------------------------------------- dry_run：只探测，不实例化
+        // 重要：实测 q61.s0 的构造器本身就会把消息入队并发出去（构造 = 发送）。
+        // 所以 dry_run 绝不能构造对象，否则就成了“假打真发”。这里只做反射能力探测。
+        if (dryRun) {
+            val probe = runCatching { probeCapability() }
+                .getOrElse { t ->
+                    WxLog.e("sendText[dryRun] probe failed", t)
+                    return fail(started, true, target, body, atList.size, "能力探测失败：${t.javaClass.simpleName}: ${t.message}")
+                }
+            WxLog.i("sendText[dryRun] talker=$target len=${body.length} at=${atList.size} $probe")
+            return SendResult(
+                ok = true, dryRun = true, submitted = false, talker = target,
+                textLength = body.length, atCount = atList.size,
+                costMs = System.currentTimeMillis() - started,
+                message = "dry_run：未实例化也未发送。$probe",
+            )
+        }
+
+        // ---------------------------------------------------------- 限流（必须在构造前，构造即发送）
+        val throttle = checkThrottle()
+        if (throttle != null) {
+            return fail(started, false, target, body, atList.size, throttle)
+        }
+
+        // ---------------------------------------------------------- 造对象 = 发送（微信主线程）
         val outcome = buildOnMain(target, body, atList)
         val built = outcome.scene
         if (built == null) {
@@ -94,46 +118,45 @@ object WxSender {
                 else -> "构造消息对象失败：返回 null"
             }
             WxLog.e("sendText: $reason, $detail")
-            return fail(started, dryRun, target, body, atList.size, reason)
+            return fail(started, false, target, body, atList.size, reason)
         }
 
-        if (dryRun) {
-            WxLog.i("sendText[dryRun] talker=$target len=${body.length} at=${atList.size} net=${built.javaClass.name} ctor=$usedCtor")
-            return SendResult(
-                ok = true, dryRun = true, submitted = false, talker = target,
-                textLength = body.length, atCount = atList.size,
-                costMs = System.currentTimeMillis() - started,
-                message = "dry_run：消息对象已构造（${built.javaClass.name} $usedCtor），未提交给网络层",
-            )
-        }
-
-        // ---------------------------------------------------------- 限流
-        val throttle = checkThrottle()
-        if (throttle != null) {
-            return fail(started, dryRun, target, body, atList.size, throttle)
-        }
-
-        // ---------------------------------------------------------- 提交
-        val submitted = runCatching {
+        // 构造已把消息发出去；再按参考实现补一次 doScene（实测不会产生重复消息），失败也不影响结果
+        val doScene = runCatching {
             WxEnv.callOnMain(15_000L) { submit(built) } ?: false
         }.getOrElse { t ->
-            WxLog.e("sendText: submit failed", t)
-            return fail(started, dryRun, target, body, atList.size, "提交失败：${t.javaClass.simpleName}: ${t.message}")
+            WxLog.w("sendText: doScene 调用失败（消息已由构造器发出）：${t.javaClass.simpleName} ${t.message}")
+            false
         }
 
+        lastSendAt.set(System.currentTimeMillis())
+        bumpWindow()
         val cost = System.currentTimeMillis() - started
-        return if (submitted) {
-            lastSendAt.set(System.currentTimeMillis())
-            bumpWindow()
-            WxLog.i("sendText: submitted talker=$target len=${body.length} cost=${cost}ms")
-            SendResult(
-                ok = true, dryRun = false, submitted = true, talker = target,
-                textLength = body.length, atCount = atList.size, costMs = cost,
-                message = "已提交给微信网络层（不代表对方已收到）",
-            )
-        } else {
-            fail(started, dryRun, target, body, atList.size, "未找到可用的网络核心或提交方法")
+        WxLog.i("sendText: sent talker=$target len=${body.length} ctor=$usedCtor doScene=$doScene cost=${cost}ms")
+        return SendResult(
+            ok = true, dryRun = false, submitted = true, talker = target,
+            textLength = body.length, atCount = atList.size, costMs = cost,
+            message = "已发送（构造即入队）" + if (doScene) "，doScene 已调用" else "，doScene 未匹配（不影响发送）",
+        )
+    }
+
+    /** dry_run 能力探测：只验证反射坐标是否还在，不创建对象、不触发发送。 */
+    private fun probeCapability(): String {
+        val cl = WxEnv.classLoader ?: throw IllegalStateException("classLoader 未就绪")
+        val cls = Class.forName(MSG_CLASS, true, cl)
+        val ctors = cls.declaredConstructors
+            .filter { c ->
+                val p = c.parameterTypes
+                p.size == 6 && p[0] == String::class.java && p[1] == String::class.java &&
+                    isInt(p[2]) && isInt(p[3]) && p[5] == String::class.java
+            }
+            .joinToString(" | ") { "(" + it.parameterTypes.joinToString(",") { t -> t.simpleName } + ")" }
+        val kernel = Class.forName(KERNEL_CLASS, true, cl)
+        val getter = kernel.declaredMethods.firstOrNull {
+            it.name == NETWORK_GETTER && Modifier.isStatic(it.modifiers) && it.parameterCount == 0
         }
+        return "net=$MSG_CLASS ctors=[$ctors] kernel=$KERNEL_CLASS " +
+            (if (getter != null) "getter=$NETWORK_GETTER() ok" else "getter=missing(" + staticSummary(kernel) + ")")
     }
 
     // ------------------------------------------------------------------ 反射

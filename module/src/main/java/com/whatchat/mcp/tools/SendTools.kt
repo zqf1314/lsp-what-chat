@@ -20,10 +20,11 @@ fun registerSendTools() {
         ToolDef(
             name = "wx_send_text",
             title = "发送文本消息",
-            description = "给指定会话发送一条文本消息（走微信内部网络层 NetScene，不模拟点击）。" +
-                "默认 dry_run=true：只构造消息对象、不真正发送，用于校验坐标与参数；" +
-                "确认无误后传 dry_run=false 才会真正投递给微信网络层。" +
-                "返回 submitted=true 仅代表已提交给微信网络层，不代表对方已收到。" +
+            description = "给指定会话发送一条文本消息（走微信内部消息对象，不模拟点击）。" +
+                "默认 dry_run=true：只做反射能力探测（消息类/构造器/网络核心是否还在），" +
+                "不实例化、不发送 —— 微信 8.0.80 的 q61.s0 构造器本身就会把消息入队，所以 dry-run 不能靠“构造但不提交”实现。" +
+                "要真发必须显式 dry_run=false。" +
+                "返回 submitted=true 代表消息对象已构造并入队（构造即发送），不代表对方已收到。" +
                 "群聊 @ 人需在 text 里自带「@昵称 」前缀，并把对方 wxid 放进 at_wxids。" +
                 "正文上限 4000 字符，发送限流为 1.5 秒/条、每分钟 20 条。",
             inputSchema = Schema.obj(
@@ -32,7 +33,7 @@ fun registerSendTools() {
                     "talker" to Schema.str("会话标识：好友 wxid，或群聊 xxx@chatroom"),
                     "text" to Schema.str("正文，最多 4000 字符；群聊 @ 时需自带「@昵称 」前缀"),
                     "at_wxids" to Schema.arrStr("@ 的 wxid 列表（仅群聊生效），可选", maxItems = 50),
-                    "dry_run" to Schema.bool("true = 只构造不发送（默认）；false = 真正提交给网络层", true),
+                    "dry_run" to Schema.bool("true = 只做能力探测、不发送（默认）；false = 真正发送", true),
                 )
             ),
             readOnly = false,

@@ -20,8 +20,8 @@ android {
         applicationId = "com.whatchat.mcp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "0.2.11"
+        versionCode = 14
+        versionName = "0.2.12"
     }
 
     signingConfigs {

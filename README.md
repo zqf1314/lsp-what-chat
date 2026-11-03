@@ -116,6 +116,7 @@ gradle :module:assembleRelease
 | Eta 报“不支持并发” | 一条 keep-alive 连接上并行发多个 `tools/call`，旧实现读一个处理完再读下一个，慢调用把后面全堵住 | 0.2.7 起单连接内并发执行、按序回写（HTTP/1.1 只要求响应有序）；实测 8 并发在 7ms 内全部返回 |
 | 跑一阵后端口不再响应 | 客户端连上但数据堆在接收队列，`accept` 长期不返回；`kill -3` 抓到 `whatchat-http` 卡在 `PlainSocketImpl.socketAccept` | 0.2.8 给 `ServerSocket` 设 30s `soTimeout`（超时 continue）+ 连接改走线程池，避免线程随连接数堆积 |
 | **端口连上但一个字节都不回**（更容易复现） | 微信进程被系统冻住：`/proc/<pid>/task/<accept tid>/wchan = do_freezer_trap`、`/sys/fs/cgroup/apps/uid_10402/cgroup.freeze = 1`、`ss` 里连接停在 accept 队列（`ESTAB` 无 owner、`Recv-Q` 有字节） | 这是 Android 的 cached-app freezer，不是服务端 bug。把微信拉回前台/分屏，或对微信关掉省电限制（HyperOS：省电策略→无限制 + 最近任务上锁），进程解冻后健康检查立刻恢复 200（实测 1.9ms） |
+| 发消息“dry_run 也真发出去了” | 微信 8.0.80 的 `q61.s0` **构造器本身就把消息入队**（构造后不调任何方法，DB 里也有 `isSend=1` 的记录） | dry-run 改成纯反射能力探测（不 new 实例）；限流检查挪到构造之前；构造后再补 `doScene` 也不产生重复消息 |
 
 ## 与参考实现的关系
 
@@ -152,10 +153,20 @@ gradle :module:assembleRelease
 
 本项目落地时的取舍：
 
-- 构造与提交都放 `WxEnv.callOnMain` 里执行（参考实现整条链也在主线程），避免微信 Core 的线程断言。
-- `dry_run` 默认 `true`：只走「造对象」这一步并回显真实类名，用于校验坐标；`dry_run=false` 才提交。
-- 限流：两条之间 ≥1.5s，每分钟 ≤20 条（`wx_send_limits` 可查当前窗口用量）。
-- 失败时日志带诊断串：`ctors=`（六个构造器签名）、静态方法表、`i/2` 候选方法表，坐标漂了能直接看出改成什么。
+- **铁律：`q61.s0` 构造即发送。** 8.0.80 实测只要 `newInstance` 就会把消息入队并发出去（构造后什么都不做，DB 里也能查到该条 `isSend=1`），所以「构造但不提交」不能当 dry-run 用。
+- 因此 `dry_run=true`（默认）只做**反射能力探测**：加载 `q61.s0`、列出可用构造器、检查 `w41.i9.e()` 是否还在，不实例化、不发送；`dry_run=false` 才真正构造并发送。
+- 限流检查放在构造**之前**（构造即发送，晚一步就拦不住）。
+- 构造后再按参考实现补一次 `doScene`（`i(net,int)`），实测不会产生重复消息；匹配不到也不影响发送，只在日志里记一笔。
+- 构造与提交都在 `WxEnv.callOnMain` 里执行（参考实现整条链也在主线程），避免微信 Core 的线程断言。
+- 失败时日志带诊断串：`ctors=`（真实构造器签名）、静态方法表、`i/2` 候选方法表，坐标漂了能直接看出改成什么。
+
+实测记录（0.2.10/0.2.11，8.0.80）：
+
+| 场景 | 结果 |
+|---|---|
+| 纯文本发 `filehelper` | `msgId=12478/12481`，`isSend=1`，`msgSvrId` 非空（确实过服务器） |
+| 连续两条 | 第二条被限流拦下：`发送过快，请 1481ms 后再试` |
+| 带 `at_wxids` | 命中 `(String,String,int,int,Object,String)` 构造器（HashMap 那条），纯文本命中 `(String,String,int,int,long,String)` |
 
 ### 参考实现的能力面（1.1.8，共 6 个 ToolSet）
 
