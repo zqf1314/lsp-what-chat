@@ -427,29 +427,60 @@ object WxSender {
         val senderCls = runCatching { Class.forName(FILE_SENDER_CLASS, true, cl) }.getOrNull()
             ?: return "找不到 $FILE_SENDER_CLASS"
 
+        // WXFileObject：优先 String 构造器，退回无参 + setFilePath
         val fileObj = runCatching {
-            fileObjCls.getConstructor(String::class.java).also { it.isAccessible = true }.newInstance(path)
+            val c = fileObjCls.constructors.firstOrNull { it.parameterCount == 1 && it.parameterTypes[0] == String::class.java }
+            if (c != null) {
+                c.isAccessible = true
+                c.newInstance(path)
+            } else {
+                val o = fileObjCls.getDeclaredConstructor().also { it.isAccessible = true }.newInstance()
+                val s = fileObjCls.methods.firstOrNull { it.name == "setFilePath" && it.parameterCount == 1 }
+                    ?: throw IllegalStateException("既无 String 构造器也无 setFilePath")
+                s.isAccessible = true
+                s.invoke(o, path)
+                o
+            }
         }.getOrElse { return "构造 WXFileObject 失败：${it.javaClass.simpleName}: ${it.message}" }
 
+        // WXMediaMessage：优先 (WXFileObject) 构造器，退回无参 + 反射写 media 字段
         val msg = runCatching {
-            mediaCls.getConstructor(fileObjCls).also { it.isAccessible = true }.newInstance(fileObj)
+            val c = mediaCls.constructors.firstOrNull { it.parameterCount == 1 && it.parameterTypes[0].isInstance(fileObj) }
+            if (c != null) {
+                c.isAccessible = true
+                c.newInstance(fileObj)
+            } else {
+                val o = mediaCls.getDeclaredConstructor().also { it.isAccessible = true }.newInstance()
+                val f = allFields(mediaCls).firstOrNull { it.type.isInstance(fileObj) && !Modifier.isStatic(it.modifiers) }
+                    ?: throw IllegalStateException(
+                        "无 media 字段，字段表=" + allFields(mediaCls).joinToString(",") { it.name + ":" + it.type.simpleName }
+                    )
+                f.isAccessible = true
+                f.set(o, fileObj)
+                o
+            }
         }.getOrElse { return "构造 WXMediaMessage 失败：${it.javaClass.simpleName}: ${it.message}" }
 
-        runCatching {
-            val f = mediaCls.getField("title")
-            f.isAccessible = true
-            f.set(msg, name)
-        }.onFailure { return "设置 WXMediaMessage.title 失败：${it.message}" }
+        // title：字段优先，退回 setTitle
+        val titleField = allFields(mediaCls).firstOrNull { it.name.equals("title", true) && it.type == String::class.java }
+        if (titleField != null) {
+            runCatching { titleField.isAccessible = true; titleField.set(msg, name) }
+        } else {
+            runCatching { mediaCls.getMethod("setTitle", String::class.java).invoke(msg, name) }
+        }
 
-        val m = (senderCls.methods.asList() + senderCls.declaredMethods.asList())
-            .distinct()
-            .firstOrNull { it.name == method && it.parameterCount == 6 && it.parameterTypes[0].isInstance(msg) }
-            ?: return senderCls.name + " 上没有 " + method + "/6，候选：" + candidateSummary(senderCls.name, 6)
+        val cand = (senderCls.methods.asList() + senderCls.declaredMethods.asList()).distinct()
+        val m = cand.firstOrNull { it.name == method && it.parameterCount == 6 && it.parameterTypes[0].isInstance(msg) }
+            ?: cand.firstOrNull { it.parameterCount == 6 && it.parameterTypes[0].isInstance(msg) }
+            ?: return senderCls.name + " 上没有可用的 6 参发送方法，候选：" + candidateSummary(senderCls.name, 6)
 
         m.isAccessible = true
-        val ret = runCatching { m.invoke(null, msg, FILE_APP_ID, FILE_APP_TYPE, talker, 2, "") }
-            .getOrElse { return "调用 k0.$method 失败：${it.javaClass.simpleName}: ${it.message}" }
-        WxLog.i("sendFile: k0.$method ret=$ret")
+        val receiver: Any? = if (Modifier.isStatic(m.modifiers)) null
+        else (senderInstance(senderCls) ?: return "k0.${m.name} 是实例方法但拿不到实例")
+
+        val ret = runCatching { m.invoke(receiver, msg, FILE_APP_ID, FILE_APP_TYPE, talker, 2, "") }
+            .getOrElse { return "调用 k0.${m.name} 失败：${it.javaClass.simpleName}: ${it.message}" }
+        WxLog.i("sendFile: k0.${m.name} ret=$ret")
         return null
     }
 
@@ -459,6 +490,22 @@ object WxSender {
             .take(8)
             .joinToString(";") { m -> m.name + "(" + m.parameterTypes.joinToString(",") { it.simpleName } + ")" }
     }.getOrDefault("?")
+
+    /** 沿继承链收集全部字段（反射写 SDK 模型时要用）。 */
+    private fun allFields(c: Class<*>): List<java.lang.reflect.Field> {
+        val out = ArrayList<java.lang.reflect.Field>()
+        var k: Class<*>? = c
+        while (k != null && k != Any::class.java) {
+            out.addAll(k.declaredFields)
+            k = k.superclass
+        }
+        return out
+    }
+
+    /** 拿发送器实例：无参构造器优先，Kotlin object 的 INSTANCE 兜底。 */
+    private fun senderInstance(c: Class<*>): Any? =
+        runCatching { c.getDeclaredConstructor().also { it.isAccessible = true }.newInstance() }.getOrNull()
+            ?: runCatching { c.getField("INSTANCE").also { it.isAccessible = true }.get(null) }.getOrNull()
 
     /** 发引用回复：自拼 refermsg appmsg，再按 type=49 走同一条发送链。 */
     fun sendQuote(
