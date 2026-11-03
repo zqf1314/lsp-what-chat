@@ -47,14 +47,30 @@ private fun registerSendFile() {
                 val dryRun = if (args.has("dry_run")) args.optBoolean("dry_run", true) else true
 
                 val before = if (dryRun) 0L else fqLatestMsgId(talker)
-                val r = WxSender.sendFile(talker, path, name, dryRun, args.optString("method", "Kj"))
-                val hit = if (r.ok && !r.dryRun) fqWaitNewMessage(talker, before, 3000L) else null
+                val explicit = args.optString("method", "").trim()
+                val candidates = if (explicit.isEmpty()) listOf("Kj", "Tj", "Jj") else listOf(explicit)
+                var used = candidates.first()
+                var r = WxSender.sendFile(talker, path, name, dryRun, used)
+                var hit = if (r.ok && !r.dryRun) fqWaitNewMessage(talker, before, 2500L) else null
+                if (!dryRun && hit == null) {
+                    // lt5.d5 上文件名/路径三参的候选不止一个，只有真落库才算命中：
+                    // 逐个补试，命中即停（每次之间留出击穿限流的最小间隔）。
+                    for (candidate in candidates.drop(1)) {
+                        runCatching { Thread.sleep(1600) }
+                        used = candidate
+                        r = WxSender.sendFile(talker, path, name, false, candidate)
+                        if (!r.ok) continue
+                        hit = fqWaitNewMessage(talker, before, 2500L)
+                        if (hit != null) break
+                    }
+                }
                 val data = JSONObject()
                     .put("talker", r.talker)
                     .put("path", r.path)
                     .put("sizeBytes", r.sizeBytes)
                     .put("dryRun", r.dryRun)
                     .put("submitted", r.submitted)
+                    .put("methodUsed", used)
                     .put("verified", hit != null)
                     .put("msgId", hit?.get("msgId") ?: "")
                     .put("msgType", hit?.get("type") ?: "")
@@ -139,7 +155,20 @@ private fun registerSendQuote() {
                     .put("msgType", hit?.get("type") ?: "")
                     .put("costMs", r.costMs)
                     .put("message", if (hit != null) r.message + "；已入库 msgId=" + hit["msgId"] + " type=" + hit["type"] else r.message)
-                if (r.ok) Jsons.ok(data) else Jsons.err(r.message, "SEND_FAILED").put("data", data)
+                // 引用必须落成 appmsg（type=49）。落成 1 说明 netScene 的类型没生效，
+                // 对方看到的是原始 XML —— 这种情况算失败，不能假装成功。
+                val downgraded = hit != null && hit["type"] != "49"
+                if (downgraded) {
+                    Jsons.err(
+                        "引用回复被微信降级成纯文本（type=" + hit?.get("type") + "），appmsg 类型未生效；" +
+                            "已发出的这条会显示成原始 XML，请忽略。需要换 appmsg 专用入口。",
+                        "QUOTE_DOWNGRADED"
+                    ).put("data", data)
+                } else if (r.ok) {
+                    Jsons.ok(data)
+                } else {
+                    Jsons.err(r.message, "SEND_FAILED").put("data", data)
+                }
             }
         }
     )
