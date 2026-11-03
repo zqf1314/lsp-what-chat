@@ -8,6 +8,8 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * 极简 HTTP/1.1 服务器，只服务 MCP 需要的那几条路径。
@@ -76,6 +78,16 @@ class HttpServer(
         val body: String,
     )
 
+    private class Pending(val resp: HttpResp, val keepAlive: Boolean)
+
+    /**
+     * 单连接上的请求**并发执行、按序回写**。
+     *
+     * Eta 会复用一条 keep-alive 连接并行发多个 tools/call；之前的实现是「读一个 → 处理完 → 写一个」，
+     * 一个慢调用（例如等主线程 15s）会把后面的请求全堵住，表现就是“不支持并发”。
+     * HTTP/1.1 只要求响应顺序与请求顺序一致，不要求串行处理，所以这里把请求丢进线程池，
+     * 用序号 + 条件变量保证回写顺序。
+     */
     private fun serve(socket: Socket) {
         try {
             socket.soTimeout = 120_000
@@ -83,16 +95,54 @@ class HttpServer(
             val input = BufferedInputStream(socket.getInputStream())
             val output = BufferedOutputStream(socket.getOutputStream())
 
-            var served = 0
-            while (running && served < MAX_REQ_PER_CONN) {
-                val req = readRequest(input) ?: break
-                served++
+            val lock = Object()
+            val pending = HashMap<Int, Pending>()
+            var nextToWrite = 0
+            var submitted = 0
+            var terminate = false
 
-                val resp = route(req)
+            fun flushLocked() {
+                while (!terminate) {
+                    val item = pending.remove(nextToWrite) ?: return
+                    writeResponse(output, item.resp, item.keepAlive)
+                    nextToWrite++
+                    if (!item.keepAlive) {
+                        terminate = true
+                        return
+                    }
+                }
+            }
+
+            var served = 0
+            while (running && served < MAX_REQ_PER_CONN && !terminate) {
+                val req = readRequest(input) ?: break
+                val index = served
+                served++
                 val keepAlive = served < MAX_REQ_PER_CONN && !wantsClose(req)
 
-                writeResponse(output, adaptForAccept(req, resp), keepAlive)
-                if (!keepAlive) break
+                WORKERS.execute {
+                    val resp = try {
+                        adaptForAccept(req, route(req))
+                    } catch (t: Throwable) {
+                        WxLog.e("route failed: ${req.path}", t)
+                        HttpResp(500, "application/json", """{"error":"internal"}""")
+                    }
+                    synchronized(lock) {
+                        pending[index] = Pending(resp, keepAlive)
+                        runCatching { flushLocked() }
+                            .onFailure { terminate = true }
+                        lock.notifyAll()
+                    }
+                }
+                synchronized(lock) { submitted = served }
+            }
+
+            // 读循环结束（客户端关闭 / 达到上限 / 收到 Connection: close）：等已提交的响应写完
+            val deadline = System.currentTimeMillis() + 12_000
+            synchronized(lock) {
+                while (nextToWrite < submitted && !terminate && System.currentTimeMillis() < deadline) {
+                    lock.wait(200)
+                }
             }
         } catch (t: Throwable) {
             // 客户端断开、超时都会走到这里，正常现象，不打堆栈
@@ -284,5 +334,13 @@ class HttpServer(
     companion object {
         private const val MAX_REQ_PER_CONN = 64
         private const val MAX_BODY = 8 * 1024 * 1024
+
+        /**
+         * 单连接内并行执行请求的工作线程池。
+         * Eta 在一条 keep-alive 连接上并发发多个 tools/call，串行处理会让慢查询把后面的全堵死。
+         */
+        private val WORKERS: ExecutorService = Executors.newFixedThreadPool(8) { r ->
+            Thread(r, "whatchat-work").apply { isDaemon = true }
+        }
     }
 }
