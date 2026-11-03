@@ -14,6 +14,7 @@ import org.json.JSONObject
 fun registerSendFileQuoteTools() {
     registerSendFile()
     registerSendQuote()
+    registerSendCard()
 }
 
 private fun registerSendFile() {
@@ -174,7 +175,96 @@ private fun registerSendQuote() {
     )
 }
 
+private fun registerSendCard() {
+    ToolRegistry.register(
+        ToolDef(
+            name = "wx_send_card",
+            title = "发送联系人名片",
+            description = "把某个联系人的名片发到指定会话（微信 type=42 名片消息，content 为 <msg username=… nickname=… />）。" +
+                "wxid 传被分享联系人的 wxid；nickname/alias/province/city/sex 缺省从 rcontact 表补。默认 dry_run=true。",
+            inputSchema = Schema.obj(
+                required = listOf("talker", "wxid"),
+                props = listOf(
+                    "talker" to Schema.str("会话标识：好友 wxid，或群聊 xxx@chatroom"),
+                    "wxid" to Schema.str("被分享联系人的 wxid（不能是群）"),
+                    "nickname" to Schema.str("可选：名片昵称，缺省取 rcontact.nickname/conRemark"),
+                    "alias" to Schema.str("可选：微信号"),
+                    "province" to Schema.str("可选：省份"),
+                    "city" to Schema.str("可选：城市"),
+                    "sex" to Schema.str("可选：性别 0/1/2，缺省 0"),
+                    "dry_run" to Schema.bool("仅组装不发送，默认 true")
+                )
+            ),
+            readOnly = false,
+            destructive = false,
+            idempotent = false,
+            openWorld = true
+        ) { args ->
+            Tools.safe {
+                val talker = args.optString("talker", "").trim()
+                if (talker.isEmpty()) return@safe Jsons.err("talker 不能为空", "BAD_ARGUMENT")
+                val wxid = args.optString("wxid", "").trim()
+                if (wxid.isEmpty()) return@safe Jsons.err("wxid 不能为空", "BAD_ARGUMENT")
+                if (wxid.endsWith("@chatroom")) return@safe Jsons.err("群聊不能当名片发送：$wxid", "BAD_ARGUMENT")
+                val dryRun = if (args.has("dry_run")) args.optBoolean("dry_run", true) else true
+
+                val profile = fqContactProfile(wxid)
+                val nickname = args.optString("nickname", "").ifBlank { profile["nickname"] ?: "" }
+                    .ifBlank { profile["conRemark"] ?: "" }
+                val extra = mapOf(
+                    "alias" to args.optString("alias", "").ifBlank { profile["alias"] ?: "" },
+                    "province" to args.optString("province", "").ifBlank { profile["province"] ?: "" },
+                    "city" to args.optString("city", "").ifBlank { profile["city"] ?: "" },
+                    "sex" to args.optString("sex", "").ifBlank { profile["sex"] ?: "0" }
+                )
+
+                val before = if (dryRun) 0L else fqLatestMsgId(talker)
+                val r = WxSender.sendCard(talker, wxid, nickname, extra, dryRun)
+                val hit = if (r.ok && !r.dryRun) fqWaitNewMessage(talker, before, 3000L) else null
+                val data = JSONObject()
+                    .put("talker", talker)
+                    .put("wxid", wxid)
+                    .put("nickname", nickname)
+                    .put("dryRun", r.dryRun)
+                    .put("submitted", r.submitted)
+                    .put("verified", hit != null)
+                    .put("msgId", hit?.get("msgId") ?: "")
+                    .put("msgType", hit?.get("type") ?: "")
+                    .put("costMs", r.costMs)
+                    .put(
+                        "message",
+                        if (hit != null) r.message + "；已入库 msgId=" + hit["msgId"] + " type=" + hit["type"] else r.message
+                    )
+                // 名片必须是 type=42；落成别的类型说明微信没按名片解析（显示成文本/未知消息）。
+                val mismatch = hit != null && !fqIsCardType(hit["type"] ?: "")
+                if (mismatch) {
+                    Jsons.err(
+                        "名片消息落库 type=" + hit?.get("type") + "（期望 42），微信没有按名片卡片解析",
+                        "CARD_TYPE_MISMATCH"
+                    ).put("data", data)
+                } else if (r.ok) {
+                    Jsons.ok(data)
+                } else {
+                    Jsons.err(r.message, "SEND_FAILED").put("data", data)
+                }
+            }
+        }
+    )
+}
+
 // ------------------------------------------------------------------ 内部辅助
+
+/** 名片用：从 rcontact 取昵称/备注/微信号等（列可能随版本变化，用 SELECT * 再按键取）。 */
+private fun fqContactProfile(wxid: String): Map<String, String> = runCatching {
+    DbGateway.query("SELECT * FROM rcontact WHERE username=" + fqQuote(wxid) + " LIMIT 1", null, 1)
+        .firstOrNull() ?: emptyMap()
+}.getOrDefault(emptyMap())
+
+/** 名片落库 type：低 32 位应为 42（高位可能是 appmsg/flags）。 */
+private fun fqIsCardType(type: String): Boolean {
+    val v = type.trim().toLongOrNull() ?: return false
+    return v == 42L || (v and 0xFFFFFFFFL) == 42L
+}
 
 private fun fqQuote(value: String): String = "'" + value.replace("'", "''") + "'"
 

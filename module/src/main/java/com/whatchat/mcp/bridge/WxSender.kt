@@ -537,7 +537,7 @@ object WxSender {
         checkThrottle()?.let { return fail(it) }
 
         val err = runCatching {
-            WxEnv.callOnMain(20_000L) { sendQuoteNow(target, xml, QUOTE_MSG_TYPE) }
+            WxEnv.callOnMain(20_000L) { sendViaBuilder(target, xml, QUOTE_MSG_TYPE) }
         }.getOrElse { "主线程执行失败：${it.javaClass.simpleName}: ${it.message}" }
         val cost = System.currentTimeMillis() - started
         if (err != null) {
@@ -551,6 +551,72 @@ object WxSender {
         )
     }
 
+    /** 名片消息：外层 type=42，content 是微信自己的 `<msg username=… nickname=… />`。 */
+    private const val CARD_MSG_TYPE = 42
+
+    /** 发联系人名片（参考实现 gea.ʻˊ：微信名片 XML + 同一条发送链，type=42）。 */
+    fun sendCard(
+        talker: String,
+        cardWxid: String,
+        nickname: String = "",
+        extra: Map<String, String> = emptyMap(),
+        dryRun: Boolean = true,
+    ): SendResult {
+        val started = System.currentTimeMillis()
+        val target = talker.trim()
+        val wxid = cardWxid.trim()
+        val xml = buildCardXml(wxid, nickname.trim(), extra)
+
+        fun fail(msg: String): SendResult = SendResult(
+            false, dryRun, false, target, xml.length, 0,
+            System.currentTimeMillis() - started, msg
+        )
+
+        if (target.isEmpty()) return fail("talker 不能为空")
+        if (wxid.isEmpty()) return fail("wxid 不能为空")
+        if (wxid.endsWith("@chatroom")) return fail("群聊不能当名片发送：$wxid")
+        if (dryRun) {
+            return SendResult(
+                true, true, false, target, xml.length, 0,
+                System.currentTimeMillis() - started,
+                "dry_run：未发送。$probeBuilder()；xml=" + xml.take(120)
+            )
+        }
+        checkThrottle()?.let { return fail(it) }
+
+        val err = runCatching {
+            WxEnv.callOnMain(20_000L) { sendViaBuilder(target, xml, CARD_MSG_TYPE) }
+        }.getOrElse { "主线程执行失败：${it.javaClass.simpleName}: ${it.message}" }
+        val cost = System.currentTimeMillis() - started
+        if (err != null) {
+            WxLog.e("sendCard: $err")
+            return fail(err)
+        }
+        WxLog.i("sendCard: sent talker=$target wxid=$wxid cost=${cost}ms")
+        return SendResult(
+            true, false, true, target, xml.length, 0, cost,
+            "已提交名片消息（wxid=$wxid，xml ${xml.length} 字符）"
+        )
+    }
+
+    /** 名片 XML：字段名固定，微信按 type=42 解析；缺省值留空即可（sex 填 0）。 */
+    private fun buildCardXml(wxid: String, nickname: String, extra: Map<String, String>): String {
+        fun f(key: String, def: String = ""): String =
+            extra[key]?.takeIf { it.isNotBlank() } ?: def
+        return buildString {
+            append("<msg username=\"").append(xmlEscape(wxid)).append("\"")
+            append(" nickname=\"").append(xmlEscape(nickname)).append("\"")
+            append(" fullpy=\"").append(xmlEscape(f("fullpy"))).append("\"")
+            append(" shortpy=\"").append(xmlEscape(f("shortpy"))).append("\"")
+            append(" alias=\"").append(xmlEscape(f("alias"))).append("\"")
+            append(" province=\"").append(xmlEscape(f("province"))).append("\"")
+            append(" city=\"").append(xmlEscape(f("city"))).append("\"")
+            append(" sign=\"").append(xmlEscape(f("sign"))).append("\"")
+            append(" sex=\"").append(xmlEscape(f("sex", "0"))).append("\"")
+            append(" imgstatus=\"0\" weiboflag=\"0\" />")
+        }
+    }
+
     private fun probeBuilder(): String = runCatching {
         val cl = WxEnv.classLoader ?: return@runCatching "classLoader 未就绪"
         val f = Class.forName(BUILDER_FACTORY, true, cl)
@@ -560,8 +626,8 @@ object WxSender {
         if (m == null) "builder 工厂不可用" else "builder 工厂 ok（$BUILDER_FACTORY.a(String)）"
     }.getOrElse { "probe 异常：${it.message}" }
 
-    /** 照 WeChat 自己 ChattingBrandServiceHelper 的写法发送 appmsg。 */
-    private fun sendQuoteNow(talker: String, xml: String, msgType: Int): String? {
+    /** 照 WeChat 自己 ChattingBrandServiceHelper 的写法：任意类型消息都走 q61.t1 builder。 */
+    private fun sendViaBuilder(talker: String, content: String, msgType: Int): String? {
         val cl = WxEnv.classLoader ?: return "classLoader 未就绪"
         val factory = runCatching { Class.forName(BUILDER_FACTORY, true, cl) }.getOrNull()
             ?: return "找不到 $BUILDER_FACTORY"
