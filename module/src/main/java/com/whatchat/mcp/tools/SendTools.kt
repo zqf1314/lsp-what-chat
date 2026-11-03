@@ -156,6 +156,29 @@ fun registerSendTools() {
             }
         }
     )
+
+    ToolRegistry.register(
+        ToolDef(
+            name = "wx_probe_send",
+            title = "勘察发送核方法表",
+            description = "诊断用：在微信进程内反射列出某个类的全部方法签名（名字/参数/返回值/是否静态），" +
+                "用于确认发送核（默认 lt5.d5）上有哪些可用的发送入口。只读，不发送任何消息。",
+            inputSchema = Schema.obj(
+                props = listOf(
+                    "cls" to Schema.str("要勘察的类名，默认 lt5.d5（图片/媒体发送核）"),
+                    "max" to Schema.int("最多返回多少条方法，默认 200"),
+                )
+            ),
+            readOnly = true,
+        ) { args ->
+            Tools.safe {
+                val cls = args.optString("cls", "").ifBlank { "lt5.d5" }
+                val max = args.optInt("max", 200).coerceIn(1, 600)
+                val dump = WxSender.dumpMethods(cls, max)
+                Jsons.ok(JSONObject().put("cls", cls).put("dump", dump))
+            }
+        }
+    )
 }
 
 /** at_wxids 支持 JSON 数组 / 逗号分隔字符串 / 缺省。 */

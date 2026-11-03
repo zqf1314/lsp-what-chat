@@ -281,6 +281,28 @@ object WxSender {
         return null
     }
 
+    /** 诊断用：列出指定类的全部方法签名，供坐标勘察（不发送任何消息）。 */
+    fun dumpMethods(clsName: String, max: Int = 200): String {
+        val cl = WxEnv.classLoader ?: return "classLoader 未就绪"
+        val cls = runCatching { Class.forName(clsName, true, cl) }.getOrNull()
+            ?: return "$clsName 不存在"
+        val sb = StringBuilder("$clsName declared=").append(cls.declaredMethods.size)
+        var n = 0
+        for (m in cls.declaredMethods.sortedWith(compareBy({ it.name }, { it.parameterCount }))) {
+            if (n++ >= max) {
+                sb.append("\n…(已截断)")
+                break
+            }
+            val static = java.lang.reflect.Modifier.isStatic(m.modifiers)
+            sb.append('\n')
+                .append(if (static) "static " else "")
+                .append(m.name).append('(')
+                .append(m.parameterTypes.joinToString(",") { it.simpleName })
+                .append("):").append(m.returnType.simpleName)
+        }
+        return sb.toString()
+    }
+
     private fun findMediaMethod(cls: Class<*>, name: String): Method? =
         (cls.methods.asList() + cls.declaredMethods.asList())
             .distinct()
