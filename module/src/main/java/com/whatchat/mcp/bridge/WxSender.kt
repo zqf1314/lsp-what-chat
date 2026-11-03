@@ -49,6 +49,10 @@ object WxSender {
     private val windowStart = AtomicLong(0)
     private val windowCount = AtomicInteger(0)
 
+    /** 最近一次命中的构造器签名，仅用于日志/诊断。 */
+    @Volatile
+    private var usedCtor: String = ""
+
     data class SendResult(
         val ok: Boolean,
         val dryRun: Boolean,
@@ -94,12 +98,12 @@ object WxSender {
         }
 
         if (dryRun) {
-            WxLog.i("sendText[dryRun] talker=$target len=${body.length} at=${atList.size} net=${built.javaClass.name}")
+            WxLog.i("sendText[dryRun] talker=$target len=${body.length} at=${atList.size} net=${built.javaClass.name} ctor=$usedCtor")
             return SendResult(
                 ok = true, dryRun = true, submitted = false, talker = target,
                 textLength = body.length, atCount = atList.size,
                 costMs = System.currentTimeMillis() - started,
-                message = "dry_run：消息对象已构造（${built.javaClass.name}），未提交给网络层",
+                message = "dry_run：消息对象已构造（${built.javaClass.name} $usedCtor），未提交给网络层",
             )
         }
 
@@ -168,23 +172,43 @@ object WxSender {
         // 参考实现无条件塞这一项，@ 列表为空时就是空 CDATA
         map["atuserlist"] = "<![CDATA[" + atWxIds.joinToString(",") + "]]>"
 
-        val ctor = findConstructor(cls)
-            ?: throw IllegalStateException("没找到 6 参构造器，实际：" + ctorSummary(cls))
-        ctor.isAccessible = true
-        return ctor.newInstance(talker, text, MSG_TYPE, MSG_SCENE, map, "")
-    }
-
-    private fun findConstructor(cls: Class<*>): Constructor<*>? =
-        cls.declaredConstructors.firstOrNull { c ->
+        // 8.0.80 实测只有这两个 6 参构造：
+        //   (String,String,int,int,long,String)   —— 不带附加信息
+        //   (String,String,int,int,Object,String) —— 第 5 参接 HashMap（@ 列表就走这条）
+        // 参考实现传的是 HashMap，所以优先 Object 变体。
+        val candidates = ArrayList<Pair<Constructor<*>, Array<Any?>>>()
+        cls.declaredConstructors.forEach { c ->
             val p = c.parameterTypes
-            p.size == 6 &&
-                p[0] == String::class.java &&
-                p[1] == String::class.java &&
-                isInt(p[2]) &&
-                isInt(p[3]) &&
-                Map::class.java.isAssignableFrom(p[4]) &&
-                p[5] == String::class.java
+            if (p.size != 6 || p[0] != String::class.java || p[1] != String::class.java ||
+                !isInt(p[2]) || !isInt(p[3]) || p[5] != String::class.java
+            ) {
+                return@forEach
+            }
+            when {
+                p[4] == Any::class.java || p[4] == Object::class.java || Map::class.java.isAssignableFrom(p[4]) ->
+                    candidates.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, map, ""))
+                p[4] == java.lang.Long::class.java || p[4] == Long::class.javaPrimitiveType ->
+                    candidates.add(c to arrayOf<Any?>(talker, text, MSG_TYPE, MSG_SCENE, 0L, ""))
+            }
         }
+
+        if (candidates.isEmpty()) {
+            throw IllegalStateException("没找到可用的 6 参构造器，实际：" + ctorSummary(cls))
+        }
+
+        var last: Throwable? = null
+        candidates.forEach { (ctor, args) ->
+            runCatching {
+                ctor.isAccessible = true
+                usedCtor = "(" + ctor.parameterTypes.joinToString(",") { it.simpleName } + ")"
+                return ctor.newInstance(*args)
+            }.onFailure { last = it }
+        }
+        throw IllegalStateException(
+            "构造器全部失败：" + (last?.let { "${it.javaClass.simpleName}: ${it.message}" } ?: "unknown") +
+                "，实际：" + ctorSummary(cls)
+        )
+    }
 
     private fun submit(netScene: Any): Boolean {
         val cl = WxEnv.classLoader ?: throw IllegalStateException("classLoader 未就绪")

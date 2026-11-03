@@ -115,6 +115,7 @@ gradle :module:assembleRelease
 | 覆盖安装后模块又“无作用” | 日志里没有 `MCP http listening`，`modules_state.enabled=0`（LSPosed 把模块判为未启用） | 到 LSPosed 管理器把 WhatChat MCP 勾上、作用域勾微信，再强制停止微信重开；本仓库不动 `modules_config.db` |
 | Eta 报“不支持并发” | 一条 keep-alive 连接上并行发多个 `tools/call`，旧实现读一个处理完再读下一个，慢调用把后面全堵住 | 0.2.7 起单连接内并发执行、按序回写（HTTP/1.1 只要求响应有序）；实测 8 并发在 7ms 内全部返回 |
 | 跑一阵后端口不再响应 | 客户端连上但数据堆在接收队列，`accept` 长期不返回；`kill -3` 抓到 `whatchat-http` 卡在 `PlainSocketImpl.socketAccept` | 0.2.8 给 `ServerSocket` 设 30s `soTimeout`（超时 continue）+ 连接改走线程池，避免线程随连接数堆积 |
+| **端口连上但一个字节都不回**（更容易复现） | 微信进程被系统冻住：`/proc/<pid>/task/<accept tid>/wchan = do_freezer_trap`、`/sys/fs/cgroup/apps/uid_10402/cgroup.freeze = 1`、`ss` 里连接停在 accept 队列（`ESTAB` 无 owner、`Recv-Q` 有字节） | 这是 Android 的 cached-app freezer，不是服务端 bug。把微信拉回前台/分屏，或对微信关掉省电限制（HyperOS：省电策略→无限制 + 最近任务上锁），进程解冻后健康检查立刻恢复 200（实测 1.9ms） |
 
 ## 与参考实现的关系
 
@@ -142,7 +143,7 @@ gradle :module:assembleRelease
 
 | 用途 | 常量/调用 |
 |---|---|
-| 文本消息对象 | `Class.forName("q61.s0")`，构造参数 `(talker, text, Integer(1), Integer(0x123), HashMap, "")` |
+| 文本消息对象 | `Class.forName("q61.s0")`；8.0.80 实测只有两个 6 参构造：`(String,String,int,int,Object,String)`（第 5 参接 HashMap，@ 列表走这条）与 `(String,String,int,int,long,String)`（无附加信息）。参考实现传 HashMap，故优先 Object 变体 |
 | @ 人 | 上面那个 HashMap 放 `"atuserlist" -> "<![CDATA[wxid1,wxid2]]>"` |
 | 提交 | `Class.forName("w41.i9")`（与取库同一个内核类）→ 静态 `e()` 拿网络核心实例 → 对实例调 `i(netScene, Integer(0))` |
 | 其它消息 | 图片/文件/引用/名片各有独立的 lambda（`sendWeChatImageMessage` / `sendWeChatFileMessage` / `sendWeChatQuoteMessage` / `sendWeChatContactCardMessage`），套路一致 |
