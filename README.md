@@ -28,7 +28,7 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | 8.0.78 坐标勘察（DbGateway.probe 扫描 `SQLiteDatabase` 字段） | 代码就绪，APK 已装机，待启用模块后验证 `dbProbe` |
+| M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
 | M2 | 发送（文本/图片/文件/引用）+ dry_run + 限流 | 待开工 |
 | M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 待开工 |
@@ -109,6 +109,8 @@ gradle :module:assembleRelease
 | 卸载重装会丢 LSPosed 启用状态 | `modules_state` / `scope` 行被清空，模块回到未启用 | 固定签名后正常覆盖升级即可，别再卸载 |
 | UI 读不到微信进程状态 | 模块 Activity 在独立进程，`WxEnv` 永远 unknown | 改成 TCP 探测 `127.0.0.1:18765`，微信版本走 `PackageManager` 读 |
 | 主线程 `Socket.connect` | 抛 `NetworkOnMainThreadException`，探测恒为 false | 探测放后台线程，结果回 `runOnUiThread` |
+| 微信不用 AOSP 的 `SQLiteDatabase` | 扫 `android.database.sqlite.SQLiteDatabase` 字段一个都扫不到（`fields=0`），hook `com.tencent.wcdb.database.SQLiteDatabase` 的构造器/rawQuery 也挂不上（微信 8.0.80 不走那些入口） | 改成照抄 `com.wechat.wechatai` 1.1.8 的反射链：`w41.i9.b()` → `t()` → `f(sql,args,0)`（见下节坐标表） |
+| 覆盖安装后模块又“无作用” | 日志里没有 `MCP http listening`，`modules_state.enabled=0`（LSPosed 把模块判为未启用） | 到 LSPosed 管理器把 WhatChat MCP 勾上、作用域勾微信，再强制停止微信重开；本仓库不动 `modules_config.db` |
 
 ## 与参考实现的关系
 
@@ -116,6 +118,19 @@ gradle :module:assembleRelease
 
 - 它自带 Agent 运行时（Koog）+ MCP **客户端**；本项目只做 MCP **服务端**，把能力交给 Eta。
 - 它的工具集含 Shell/root、文件系统、设备信息（约 80 个），本项目刻意只保留微信相关能力——Eta 本身已有终端与文件能力。
+
+### 取库坐标（微信 8.0.80，来自 1.1.8 的 `Lz2/l54;` 常量表）
+
+参考实现把「按微信版本变动的混淆名」写成一张表（`Lz2/l54` 的字段 + 注解名），`Lz2/x16` 是它的 DB 网关。我们只抄 DB 这一小块：
+
+| 用途 | 常量/调用 |
+|---|---|
+| 方式 B（不需要 uin，本项目采用） | `Class.forName("w41.i9").b()` → 实例 → `实例.t()` → db |
+| 方式 A（需要 uin，暂未用） | `Class.forName("ai5.d0").newInstance()` → `实例.R(uin)`，由微信自己打开 `EnMicroMsg.db` |
+| 查询 | `db.f(String sql, String[] selectionArgs, int 0)` → `Cursor` |
+| 就绪判断 | `db` 非 null；`DbGateway.probeReport` 里的 `wxdb=` 段是解析诊断 |
+
+对应实现：`module/src/main/java/com/whatchat/mcp/bridge/WxDb.kt`（`WxEnv.callOnMain` 内解析与查询，避免微信 Core 的线程约束）；`DbGateway` 优先走它，`SqliteHook` 保留为兜底。
 
 ## 免责
 
