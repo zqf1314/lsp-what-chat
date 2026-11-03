@@ -22,6 +22,7 @@ object Tools {
         registerContactTools()
         registerSendTools()
         registerSendFileQuoteTools()
+        registerAnalysisTools()
         registerRawSqlTool()
     }
 
