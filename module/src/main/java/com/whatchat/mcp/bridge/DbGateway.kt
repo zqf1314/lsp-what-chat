@@ -46,6 +46,8 @@ object DbGateway {
             }
             append(" attached=")
             append(handlePath ?: "none")
+            append(" wxdb=")
+            append(WxDb.diag)
             if (fieldCandidates.isNotEmpty()) {
                 append(" candidates=")
                 append(fieldCandidates.take(8).joinToString(","))
@@ -55,6 +57,9 @@ object DbGateway {
     // ------------------------------------------------------------------ 对外 API
 
     fun db(): Any? {
+        // 0) 首选：照抄 wechatai 1.1.8 的反射链（微信 8.0.80 的 w41.i9 → t()）
+        WxDb.db()?.let { return cache(it, "w41.i9.t()") }
+
         handle?.let { if (SqliteHook.isOpen(it)) return it }
         handle = null
         handlePath = null
@@ -70,10 +75,18 @@ object DbGateway {
     fun isReady(): Boolean = db() != null
 
     fun query(sql: String, args: Array<String>? = null, limit: Int = 200): List<Map<String, String>> {
+        // 首选：wechatai 路径（db.f(sql, args, 0)）；cursor 与遍历都放主线程，避开 WCDB 线程约束
+        WxEnv.callOnMain(15000L) {
+            WxDb.cursor(sql, args)?.let { drain(it, limit) }
+        }?.let { return it }
+
         val instance = db() ?: throw IllegalStateException("微信数据库对象尚未就绪（$probeReport）")
         val cursor = rawQuery(instance, sql, args)
-            ?: throw IllegalStateException("rawQuery 调用失败：${instance.javaClass.name}")
+            ?: throw IllegalStateException("rawQuery 调用失败：${instance.javaClass.name}（$probeReport）")
+        return drain(cursor, limit)
+    }
 
+    private fun drain(cursor: Cursor, limit: Int): List<Map<String, String>> {
         val out = ArrayList<Map<String, String>>()
         try {
             val names = cursor.columnNames
@@ -145,9 +158,9 @@ object DbGateway {
             return probeReport
         }
 
-        // 1) hook 已经抓到就直接收工
+        // 1) 已有句柄（WxDb 反射链 / SqliteHook 任一来源）就直接收工
         db()?.let {
-            lastProbeNote = "probe: via hook costMs=${System.currentTimeMillis() - started}"
+            lastProbeNote = "probe: attached=${handlePath ?: "unknown"} costMs=${System.currentTimeMillis() - started}"
             WxLog.i("probe: attached from hook path=$handlePath")
             return probeReport
         }
