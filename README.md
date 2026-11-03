@@ -31,7 +31,7 @@
 | M0 | 8.0.80 取库坐标（照抄 `com.wechat.wechatai` 1.1.8 的 `Lz2/l54;` 表：`w41.i9.b()` → `t()` → `f(sql,args,0)`） | v0.2.6 已实现，待 LSPosed 启用后验证 `dbProbe` |
 | M1 | 8 个只读工具 + 双协议 MCP Server | 代码就绪，云端构建通过 |
 | M2 | 发送（文本/图片/文件/引用/名片）+ dry_run + 限流 | 全部实测通过（`filehelper`）：文本 `msgId=12478`；图片 `12735` `type=3`；文件 `12741` `type=0x41000031`（`WXFileObject→WXMediaMessage→k0.F`）；引用 `12742` `type=49`（`refermsg` appmsg，`q61.t1` builder）；名片 `12744` `type=42`，引用名片回归 `12745` `type=49` |
-| M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | 全部实测通过（0.2.29）：`wx_activity` 7 天 `total=3601`、`byDay` 逐日 `2026-10-28…11-04`、`topTalkers` 首位 `1985` 条；`wx_hot_words`（群 3 天采样 300 → `捂脸/https/后台`）；`wx_context`（`filehelper` anchor `12745` 带出 `12742/12743/12744`）；`wx_export_csv` `rows=48 bytes=23698`，私有 + 外部双路径 |
+| M3 | 分析向（活跃度/热词/上下文打包/CSV 导出） | **已定基准 0.2.30**（见 `BASELINE.md`）。`wx_activity` 7 天 `total=3601`、`byDay` 逐日 `2026-10-28…11-04`、`topTalkers` 带 `isChatroom`；`wx_hot_words` 降噪后（原 `com/捂脸/https` 已剔除，榜首 `后台 9`，`distinct=3786`）；`wx_context` 每条带 `time`，`before/after` 走 `(createTime,msgId)` 复合比较；`wx_export_csv` 取最近 N 条升序、表头含 `time` 列，私有 + 外部双路径 |
 
 ## 工具
 
