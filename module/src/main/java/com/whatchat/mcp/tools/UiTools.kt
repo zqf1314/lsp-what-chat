@@ -61,7 +61,7 @@ private fun registerOpenAddFriend() {
                 if (mode !in setOf("profile", "sayhi", "add", "room")) {
                     return@safe Jsons.err("mode 只能是 profile/sayhi/add/room，收到：$mode", "BAD_MODE")
                 }
-                if (mode != "add" && wxid.isEmpty()) {
+                if (mode in setOf("profile", "sayhi") && wxid.isEmpty()) {
                     return@safe Jsons.err("mode=$mode 必须给 wxid", "BAD_ARGUMENT")
                 }
                 if (wxid.length > 64 || wxid.any { it.isWhitespace() }) {
@@ -157,8 +157,13 @@ private fun registerOpenAddFriend() {
                         .put("arrived", arrived)
                         .put(
                             "hint",
-                            if (arrived) "已跳转，资料页底部就是“添加到通讯录”，剩下由你自己点"
-                            else "启动请求已发出，但没抓到目标页；微信不在前台时系统可能拦下后台启动，先把微信切到前台再试"
+                            when {
+                                !arrived -> "启动请求已发出，但没抓到目标页；微信不在前台时系统可能拦下后台启动，先把微信切到前台再试"
+                                mode == "sayhi" -> "已到打招呼页，填验证语后自己点发送"
+                                mode == "add" -> "已到添加朋友搜索页，输入 wxid/微信号搜索"
+                                mode == "room" -> "已到群资料页，点成员头像进资料页后再“添加到通讯录”"
+                                else -> "已到资料页，底部就是“添加到通讯录”，剩下由你自己点"
+                            }
                         )
                 )
             }
